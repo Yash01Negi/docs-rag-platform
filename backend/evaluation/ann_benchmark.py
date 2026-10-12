@@ -185,7 +185,8 @@ def render(result: dict) -> str:  # type: ignore[type-arg]
         f"- PostgreSQL {meta['postgres']}, pgvector {meta['pgvector']}; "
         f"maintenance_work_mem {meta['maintenance_work_mem']}, "
         f"shared_buffers {meta['shared_buffers']}, "
-        f"max_parallel_workers_per_gather {meta['parallel_workers']}",
+        f"max_parallel_workers_per_gather {meta['parallel_workers']}, "
+        f"max_parallel_maintenance_workers {meta['parallel_maintenance_workers']}",
         f"- Host: {meta['host']}",
         f"- Synthetic unit vectors, {meta['dimension']} dimensions, {meta['clusters']} clusters, "
         f"noise sd {meta['noise']}; {meta['queries']} queries per size; LIMIT {limit}",
@@ -211,6 +212,8 @@ def render(result: dict) -> str:  # type: ignore[type-arg]
                 f"{entry['latency_ms']['p95']} | {entry['recall@10']:.3f} | "
                 f"{entry[f'recall@{limit}']:.3f} | {entry['min_results_returned']} |"
             )
+    if result.get("failure"):
+        lines += ["", f"**Stopped early** at {result['failure']}"]
     return "\n".join(lines) + "\n"
 
 
@@ -246,6 +249,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "maintenance_work_mem": setting("maintenance_work_mem"),
             "shared_buffers": setting("shared_buffers"),
             "parallel_workers": setting("max_parallel_workers_per_gather"),
+            "parallel_maintenance_workers": setting("max_parallel_maintenance_workers"),
             "host": f"{platform.platform()}, {os.cpu_count()} CPUs",
             "dimension": DIMENSION,
             "clusters": args.clusters,
@@ -254,6 +258,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "limit": args.limit,
         }
         results = []
+        failure: str | None = None
         try:
             for size in sizes:
                 print(f"benchmarking {size:,} rows...", file=sys.stderr, flush=True)
@@ -262,13 +267,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                         conn, size, args.queries, args.limit, ef_values, args.clusters, args.noise
                     )
                 )
+        except psycopg.Error as exc:
+            # Keep the sizes that finished; report the one that did not.
+            failure = f"{size:,} rows: {type(exc).__name__}: {exc}".strip()
         finally:
             conn.execute(f"DROP TABLE IF EXISTS {TABLE}, {QUERY_TABLE}")
-    result = {"metadata": metadata, "sizes": results}
+    result = {"metadata": metadata, "sizes": results, "failure": failure}
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(render(result))
+    if failure:
+        print(f"error: stopped at {failure}", file=sys.stderr)
+        return 1
     return 0
 
 

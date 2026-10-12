@@ -3,14 +3,17 @@
 import asyncio
 import math
 import shutil
+import uuid
 from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
 
 from app.core.config import Settings
+from app.search.retrieval import Candidate, reciprocal_rank_fusion
 from app.search.service import SearchMode
 from evaluation.dataset import DATASET_DIR, QUERY_TYPES, DatasetError, load_dataset
+from evaluation.fusion_sweep import weighted_rrf
 from evaluation.metrics import mean, percentile, query_metrics
 from evaluation.run import EvaluationError, evaluate, render_report
 
@@ -90,6 +93,32 @@ def test_percentile_is_nearest_rank() -> None:
     with pytest.raises(ValueError):
         percentile([], 50)
     assert mean([1.0, 2.0]) == 1.5
+
+
+def test_weighted_rrf_with_equal_weights_matches_the_application() -> None:
+    ids = [uuid.UUID(int=n) for n in range(1, 9)]
+    rankings = {
+        "semantic": [ids[0], ids[3], ids[1], ids[5]],
+        "keyword": [ids[1], ids[2], ids[0], ids[7]],
+    }
+    for k in (1, 60):
+        expected = reciprocal_rank_fusion(
+            {
+                method: [Candidate(c, rank, 0.0) for rank, c in enumerate(found, 1)]
+                for method, found in rankings.items()
+            },
+            k,
+            10,
+        )
+        weights = {"semantic": 1.0, "keyword": 1.0}
+        assert weighted_rrf(rankings, k, weights, 10) == [e.chunk_id for e in expected]
+
+
+def test_lower_keyword_weight_favours_semantic_ranks() -> None:
+    a, b = uuid.UUID(int=1), uuid.UUID(int=2)
+    rankings = {"semantic": [a], "keyword": [b]}
+    assert weighted_rrf(rankings, 60, {"semantic": 1.0, "keyword": 1.0}, 2) == [a, b]  # tie: ID
+    assert weighted_rrf(rankings, 60, {"semantic": 0.5, "keyword": 1.0}, 2) == [b, a]
 
 
 # ------------------------------------------------------------------------------ dataset
@@ -173,7 +202,22 @@ def test_harness_refuses_fake_semantic_numbers_unless_asked(db_settings: Setting
         evaluate(db_settings, list(SearchMode), repeats=1, reset=True, allow_fake=True)
     )
     assert set(result["summary"]) == {"semantic", "keyword", "hybrid"}
-    assert "Fake embeddings." in render_report(result)
+    report = render_report(result)
+    assert "Fake embeddings." in report and "## Fusion settings" in report
+    # The sweep's row for the configured settings reproduces the real hybrid run.
+    default = next(
+        row
+        for row in result["fusion_sweep"]
+        if row["rrf_k"] == db_settings.search_rrf_k
+        and row["depth"] == db_settings.search_fusion_depth
+        and row["keyword_weight"] == 1.0
+    )
+    hybrid = result["summary"]["hybrid"]["by_language"]["all"]
+    assert default["ndcg"] == pytest.approx(hybrid["ndcg@10"])
+    assert default["recall"] == pytest.approx(hybrid["recall@10"])
+    semantic_only = next(row for row in result["fusion_sweep"] if row["label"] == "semantic only")
+    semantic = result["summary"]["semantic"]["by_language"]["all"]
+    assert semantic_only["ndcg"] == pytest.approx(semantic["ndcg@10"])
 
 
 @pytest.mark.integration

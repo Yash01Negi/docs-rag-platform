@@ -49,6 +49,7 @@ from app.search.service import SearchMode, SearchRequest, SearchService
 from app.storage import LocalFileStorage, new_storage_key
 from app.worker.runner import Worker
 from evaluation.dataset import Dataset, Query, load_dataset, normalize_for_matching
+from evaluation.fusion_sweep import DEPTHS, sweep
 from evaluation.metrics import mean, percentile, query_metrics
 
 CUTOFFS = (5, 10)
@@ -241,6 +242,22 @@ def _request(query: str, mode: SearchMode, top_k: int) -> SearchRequest:
     )
 
 
+async def collect_candidates(
+    dataset: Dataset, service: SearchService, sessions: async_sessionmaker[AsyncSession]
+) -> dict[str, dict[str, list[uuid.UUID]]]:
+    """Each method's own ranking at the largest sweep depth, for offline fusion."""
+    depth = max(DEPTHS)
+    candidates: dict[str, dict[str, list[uuid.UUID]]] = {}
+    for query in dataset.queries:
+        lists: dict[str, list[uuid.UUID]] = {}
+        for mode in (SearchMode.SEMANTIC, SearchMode.KEYWORD):
+            async with sessions() as session:
+                outcome = await service.search(session, _request(query.text, mode, depth))
+            lists[mode.value] = [hit.chunk.chunk_id for hit in outcome.hits]
+        candidates[query.id] = lists
+    return candidates
+
+
 # --------------------------------------------------------------------------- summary
 
 
@@ -376,6 +393,49 @@ def render_report(result: dict) -> str:  # type: ignore[type-arg]
             f"| {mode} | {values['queries']} | {values['empty_results']} | "
             f"{values['mean_results']:.1f} |"
         )
+    sweep_rows = result.get("fusion_sweep") or []
+    if sweep_rows:
+        settings = meta["search"]
+        default = next(
+            (
+                row
+                for row in sweep_rows
+                if row["rrf_k"] == settings["rrf_k"]
+                and row["depth"] == settings["fusion_depth"]
+                and row["keyword_weight"] == 1.0
+            ),
+            None,
+        )
+        fused = sorted(
+            (row for row in sweep_rows if row["label"] == "rrf"),
+            key=lambda row: (-row["ndcg"], row["rrf_k"], row["depth"], -row["keyword_weight"]),
+        )
+        shown = [row for row in sweep_rows if row["label"] != "rrf"] + fused[:10]
+        if default is not None and default not in shown:
+            shown.append(default)
+        lines += [
+            "",
+            "## Fusion settings",
+            "",
+            "Semantic and keyword candidates fetched once per query and re-fused offline with",
+            "every combination of RRF k, fusion depth and keyword weight (the application uses",
+            "weight 1). Best ten by nDCG@10, the single methods, and the current default. With",
+            f"{len(fused)} combinations tried on {meta['queries']} queries, small differences",
+            "between the top rows are not meaningful.",
+            "",
+            "| Fusion | k | Depth | Keyword weight | nDCG@10 | Recall@10 | MRR@10 | "
+            "nDCG en | nDCG ja | nDCG mixed |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        for row in shown:
+            marker = " (default)" if row is default else ""
+            by = row["ndcg_by_language"]
+            lines.append(
+                f"| {row['label']}{marker} | {row['rrf_k'] or '-'} | {row['depth'] or '-'} | "
+                f"{row['keyword_weight'] if row['keyword_weight'] is not None else '-'} | "
+                f"{row['ndcg']:.3f} | {row['recall']:.3f} | {row['mrr']:.3f} | "
+                f"{by.get('en', 0):.3f} | {by.get('ja', 0):.3f} | {by.get('mixed', 0):.3f} |"
+            )
     lines += [
         "",
         "## Latency",
@@ -469,6 +529,15 @@ async def evaluate(
         check_anchors_indexed(dataset, index)
         await service.warm_up()
         runs = await run_queries(dataset, service, sessions, index, modes, repeats)
+        sweep_rows: list[dict] = []  # type: ignore[type-arg]
+        if {SearchMode.SEMANTIC, SearchMode.KEYWORD} <= set(modes) or SearchMode.HYBRID in modes:
+            candidates = await collect_candidates(dataset, service, sessions)
+            passages_of = {
+                (query.id, chunk_id): frozenset(passages_in(chunk, query))
+                for query in dataset.queries
+                for chunk_id, chunk in index.items()
+            }
+            sweep_rows = [asdict(row) for row in sweep(dataset, candidates, passages_of)]
         model = provider.load()
     finally:
         service.close()
@@ -507,6 +576,7 @@ async def evaluate(
             },
         },
         "summary": summarize(dataset, runs, modes),
+        "fusion_sweep": sweep_rows,
         "queries": [
             {
                 "id": query.id,
