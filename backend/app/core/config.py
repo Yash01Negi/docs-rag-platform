@@ -109,6 +109,54 @@ class Settings(BaseSettings):
     # back to keyword results (and semantic search answers 503). The load continues.
     search_model_load_wait_seconds: float = Field(default=20.0, ge=0, le=600)
 
+    # --- LLM provider (Phase 4 chat) ---
+    # Only "anthropic" is implemented. Without ANTHROPIC_API_KEY the chat endpoints answer
+    # 503 llm_not_configured; conversations can still be listed, read, renamed and deleted.
+    llm_provider: Literal["anthropic"] = "anthropic"
+    # Read by this application only and sent only to the provider; never logged or returned.
+    anthropic_api_key: SecretStr | None = None
+    llm_model: str = Field(default="claude-opus-5-5", min_length=1, max_length=128)
+    llm_max_output_tokens: int = Field(default=2048, ge=64, le=64000)
+    # Sampling temperature. Unset by default: current Claude models (Claude Opus 5.5
+    # included) reject the parameter, so set it only for a model that accepts it.
+    llm_temperature: float | None = Field(default=None, ge=0, le=1)
+    # Reasoning effort (output_config.effort). Unset uses the model's default.
+    llm_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    # Server-side fallback when the requested model declines a request on policy grounds
+    # ("default" lets the API choose the substitute model; "none" turns it off).
+    llm_fallbacks: Literal["default", "none"] = "default"
+    # Connect timeout, and the longest wait for the next chunk of a streamed response.
+    llm_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    llm_read_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    # Upper bound for one whole answer, including retries before the first token.
+    llm_request_timeout_seconds: float = Field(default=180.0, gt=0, le=1800)
+    # SDK retries for connection errors, 408, 409, 429 and 5xx before any output streams.
+    llm_max_retries: int = Field(default=2, ge=0, le=10)
+
+    # --- Chat ---
+    chat_max_question_chars: int = Field(default=4000, ge=10, le=20000)
+    chat_max_title_chars: int = Field(default=200, ge=10, le=500)
+    # Retrieval for each question; the mode defaults to SEARCH_DEFAULT_MODE.
+    chat_retrieval_mode: Literal["semantic", "keyword", "hybrid"] | None = None
+    chat_retrieval_top_k: int = Field(default=8, ge=1, le=50)
+    # Semantic candidates below this cosine similarity are not given to the model. Unset by
+    # default because the threshold has not been calibrated (docs/evaluation/README.md).
+    chat_min_similarity: float | None = Field(default=None, ge=-1, le=1)
+    # Estimated-token budgets for the source passages and for earlier turns in the prompt.
+    chat_context_token_budget: int = Field(default=8000, ge=500, le=150000)
+    chat_history_token_budget: int = Field(default=3000, ge=0, le=100000)
+    chat_history_max_messages: int = Field(default=10, ge=0, le=100)
+    # A question shorter than this many characters is treated as a follow-up: the previous
+    # question is added to the retrieval query (not to the prompt) so "and in Japan?" works.
+    chat_followup_max_chars: int = Field(default=60, ge=0, le=1000)
+    # Answers generated at the same time across all conversations (one per conversation).
+    chat_max_concurrent_generations: int = Field(default=4, ge=1, le=100)
+    # Characters of each cited passage stored with the answer, for display after the
+    # source document is reindexed. Cleared when the document is deleted.
+    chat_citation_excerpt_chars: int = Field(default=600, ge=0, le=4000)
+    # SSE comment sent while waiting, so proxies do not close an idle connection.
+    chat_heartbeat_seconds: float = Field(default=15.0, gt=0, le=300)
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -166,9 +214,16 @@ class Settings(BaseSettings):
             )
         if self.search_default_top_k > self.search_max_top_k:
             raise ValueError("SEARCH_DEFAULT_TOP_K must not exceed SEARCH_MAX_TOP_K")
+        if self.chat_retrieval_top_k > self.search_max_top_k:
+            raise ValueError("CHAT_RETRIEVAL_TOP_K must not exceed SEARCH_MAX_TOP_K")
         if self.worker_heartbeat_seconds >= self.worker_lease_seconds:
             raise ValueError("WORKER_HEARTBEAT_SECONDS must be smaller than WORKER_LEASE_SECONDS")
         return self
+
+    @property
+    def llm_configured(self) -> bool:
+        key = self.anthropic_api_key
+        return key is not None and bool(key.get_secret_value().strip())
 
     @property
     def chunk_max_tokens(self) -> int:
