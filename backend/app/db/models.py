@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models for documents, chunks and ingestion jobs.
 
-The schema itself is owned by Alembic (``alembic/versions/0002_documents.py``); these models
-mirror it for queries. ``tests/test_schema.py`` checks that the two stay in sync.
+The schema itself is owned by Alembic (``alembic/versions/``); these models mirror it for
+queries. ``tests/test_schema.py`` checks that the two stay in sync.
 """
 
 import uuid
@@ -22,7 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.core.config import EMBEDDING_DIMENSION
@@ -141,6 +141,10 @@ class Chunk(Base):
     page_end: Mapped[int | None] = mapped_column(Integer)
     section: Mapped[str | None] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIMENSION))
+    # Keyword-search terms from app.search.analyzer, with positions, and their count (the
+    # document length in BM25). Written in the same transaction as the chunk itself.
+    search_vector: Mapped[str] = mapped_column(TSVECTOR)
+    search_length: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
@@ -154,6 +158,8 @@ class Chunk(Base):
             "(page_start >= 1 AND page_end >= page_start)",
             name="ck_chunks_page_range",
         ),
+        CheckConstraint("search_length >= 0", name="ck_chunks_search_length"),
+        Index("ix_chunks_search_vector", "search_vector", postgresql_using="gin"),
     )
 
 

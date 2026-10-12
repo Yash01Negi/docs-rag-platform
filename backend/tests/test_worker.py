@@ -19,6 +19,7 @@ from app.embeddings.base import EmbeddingModelInfo
 from app.embeddings.fake import FAKE_MODEL_NAME, FAKE_MODEL_REVISION, FakeEmbeddingProvider
 from app.ingestion import jobs
 from app.ingestion.errors import ErrorCode, IngestionError
+from app.search.lexical_index import lexical_entry
 from app.storage import LocalFileStorage, new_storage_key
 from app.worker.runner import Worker
 from tests.samples import ENGLISH_TEXT, JAPANESE_TEXT
@@ -152,6 +153,27 @@ async def test_successful_job_writes_chunks_and_completes(
     assert document.error_code is None
     assert [j.status for j in job_rows] == ["completed"]
     assert job_rows[0].lease_token is None and job_rows[0].completed_at is not None
+
+
+async def test_chunks_are_stored_with_keyword_search_vectors(
+    db_settings: Settings, engine: AsyncEngine, sessions, storage, tmp_path: Path
+) -> None:
+    document_id = await create_document(sessions, storage, tmp_path, JAPANESE_TEXT * 5)
+    await drain(make_worker(db_settings, engine, storage))
+
+    async with sessions() as session:
+        rows = (
+            await session.execute(
+                select(Chunk.text, Chunk.search_vector, Chunk.search_length).where(
+                    Chunk.document_id == document_id
+                )
+            )
+        ).all()
+    assert rows
+    for row in rows:
+        entry = lexical_entry(row.text)
+        assert row.search_length == entry.length > 0
+        assert "'文書':" in row.search_vector and "'postgresql':" in row.search_vector
 
 
 async def test_retryable_failure_is_retried_then_succeeds(

@@ -86,3 +86,40 @@ def test_orm_models_match_the_migrated_schema(
     finally:
         engine.dispose()
     assert differences == []
+
+
+def test_keyword_search_migration_backfills_existing_chunks(
+    alembic_config: Config, empty_database_url: str
+) -> None:
+    command.upgrade(alembic_config, "0002")
+    engine = create_engine(empty_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO documents (id, filename, file_type, mime_type, size_bytes, "
+                    "sha256, storage_key, status, chunk_count, embedding_model, "
+                    "embedding_model_revision, embedding_dimension, processed_at) VALUES "
+                    "(gen_random_uuid(), 'a.txt', 'text', 'text/plain', 10, repeat('a', 64), "
+                    "'key', 'completed', 1, 'm', 'r', 1024, now())"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO chunks (id, document_id, ordinal, text, token_count, language, "
+                    "embedding) SELECT gen_random_uuid(), id, 0, '文書を検索します。Searching "
+                    "documents', 5, 'mixed', array_fill(0.03125, ARRAY[1024])::vector "
+                    "FROM documents"
+                )
+            )
+        command.upgrade(alembic_config, "head")
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT search_vector::text AS v, search_length FROM chunks")
+            ).one()
+    finally:
+        engine.dispose()
+    assert row.v == "'document':8 'search':7 '文書':1 '検索':3"
+    assert row.search_length == 4
+
+    command.downgrade(alembic_config, "0002")

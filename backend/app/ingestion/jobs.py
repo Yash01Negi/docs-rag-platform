@@ -37,6 +37,7 @@ from app.db.models import Chunk, Document, DocumentStatus, IngestionJob, JobKind
 from app.embeddings.base import EmbeddingModelInfo
 from app.ingestion.chunking import TextChunk
 from app.ingestion.errors import ErrorCode, IngestionError
+from app.search.lexical_index import LexicalEntry
 
 logger = logging.getLogger(__name__)
 
@@ -216,12 +217,14 @@ class IndexResult:
     language: str
     page_count: int | None
     model: EmbeddingModelInfo
+    # One keyword-search entry per chunk, computed with the chunks (off the event loop).
+    lexical: Sequence[LexicalEntry]
 
 
 async def complete_job(session: AsyncSession, job: ClaimedJob, result: IndexResult) -> None:
     """Atomically replace the document's index and mark the job completed."""
-    if not result.chunks or len(result.chunks) != len(result.vectors):
-        raise ValueError("an index needs one vector per chunk and at least one chunk")
+    if not result.chunks or not len(result.chunks) == len(result.vectors) == len(result.lexical):
+        raise ValueError("an index needs one vector and lexical entry per chunk, and a chunk")
     try:
         row, document = await _lock_held_job(session, job)
         check_job_transition(row.status, JobStatus.COMPLETED)
@@ -243,8 +246,12 @@ async def complete_job(session: AsyncSession, job: ClaimedJob, result: IndexResu
                     "page_end": chunk.page_end,
                     "section": chunk.section,
                     "embedding": list(vector),
+                    "search_vector": lexical.vector,
+                    "search_length": lexical.length,
                 }
-                for chunk, vector in zip(result.chunks, result.vectors, strict=True)
+                for chunk, vector, lexical in zip(
+                    result.chunks, result.vectors, result.lexical, strict=True
+                )
             ],
         )
         document.status = DocumentStatus.COMPLETED.value

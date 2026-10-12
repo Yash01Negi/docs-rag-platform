@@ -16,6 +16,11 @@ dependencies = [
     # PDF text extraction (PDFium; BSD-3-Clause / Apache-2.0). Replaces PyMuPDF (AGPL-3.0).
     "pypdfium2>=5.14,<6",
     "python-multipart>=0.0.32,<0.1",
+    # Keyword search: Japanese morphological analysis (SudachiPy and its core dictionary,
+    # both Apache-2.0) and English stemming (Snowball, BSD-3-Clause).
+    "sudachipy>=0.7,<0.8",
+    "sudachidict-core>=20260723",
+    "snowballstemmer>=3.1,<4",
 ]
 
 [project.optional-dependencies]

@@ -11,6 +11,7 @@ from app.ingestion.errors import ErrorCode, IngestionError
 from app.ingestion.extraction import extract
 from app.ingestion.jobs import IndexResult
 from app.ingestion.language import detect_language
+from app.search.lexical_index import lexical_entry
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def build_index(
         raise IngestionError(ErrorCode.NO_EXTRACTABLE_TEXT, "No text could be chunked.")
     extracted_at = time.perf_counter()
     vectors = provider.embed([chunk.text for chunk in chunks])
+    lexical = [lexical_entry(chunk.text) for chunk in chunks]
     logger.info(
         "index_built",
         extra={
@@ -45,4 +47,5 @@ def build_index(
         language=detect_language(document.text).value,
         page_count=document.page_count,
         model=model,
+        lexical=lexical,
     )
