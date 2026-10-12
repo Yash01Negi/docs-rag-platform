@@ -26,14 +26,14 @@ const STYLES: Record<ConnectionState, { label: string; dot: string; badge: strin
 export default function StatusBadge({ state }: { state: ConnectionState }) {
   const style = STYLES[state]
   return (
-    <span
-      role="status"
+    // <output> has an implicit ARIA "status" role, so changes are announced politely.
+    <output
       aria-live="polite"
       className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-medium ring-1 ring-inset ${style.badge}`}
     >
       <span className={`h-2 w-2 rounded-full ${style.dot}`} aria-hidden="true" />
       <span className="hidden sm:inline">{style.label}</span>
       <span className="sm:hidden">{state === 'online' ? 'Connected' : style.label.split(',')[0]}</span>
-    </span>
+    </output>
   )
 }

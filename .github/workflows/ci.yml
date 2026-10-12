@@ -62,7 +62,7 @@ jobs:
         run: pytest
 
   frontend:
-    name: Frontend (typecheck + build)
+    name: Frontend (lint + typecheck + build)
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -78,6 +78,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Lint (oxlint)
+        run: npm run lint
 
       - name: TypeScript check
         run: npm run typecheck
