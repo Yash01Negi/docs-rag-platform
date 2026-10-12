@@ -141,12 +141,19 @@ class BgeM3EmbeddingProvider(EmbeddingProvider):
             snapshot = self.download()
             device = resolve_device(self.requested_device)
             try:
-                from sentence_transformers import SentenceTransformer, models
+                # sentence-transformers 6 moved the module classes; the old
+                # ``sentence_transformers.models`` path is deprecated.
+                from sentence_transformers import SentenceTransformer
+                from sentence_transformers.sentence_transformer.modules import (
+                    Normalize,
+                    Pooling,
+                    Transformer,
+                )
 
-                transformer = models.Transformer(str(snapshot), max_seq_length=self.max_seq_length)
-                pooling = models.Pooling(transformer.get_embedding_dimension(), pooling_mode="cls")
+                transformer = Transformer(str(snapshot), max_seq_length=self.max_seq_length)
+                pooling = Pooling(transformer.get_embedding_dimension(), pooling_mode="cls")
                 model = SentenceTransformer(
-                    modules=[transformer, pooling, models.Normalize()], device=device
+                    modules=[transformer, pooling, Normalize()], device=device
                 )
                 model.eval()
             except Exception as exc:
