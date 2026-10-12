@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 
 import ConfirmDialog from '../components/documents/ConfirmDialog'
 import DocumentStatusBadge from '../components/documents/DocumentStatusBadge'
@@ -31,8 +31,18 @@ const CHUNK_PAGE_SIZE = 10
 const actionClass =
   'inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed disabled:opacity-50'
 
-function ChunkList({ documentId }: { documentId: string }) {
-  const [offset, setOffset] = useState(0)
+// Bring the chunk a search result pointed at into view and move focus to it.
+function scrollToChunk(node: HTMLLIElement | null) {
+  node?.scrollIntoView?.({ block: 'center' })
+  node?.focus()
+}
+
+function ChunkList({ documentId, focus }: { documentId: string; focus: number | null }) {
+  // A search result links here with ?chunk=<ordinal>: open the page that contains it.
+  const [offset, setOffset] = useState(
+    focus === null ? 0 : Math.floor(focus / CHUNK_PAGE_SIZE) * CHUNK_PAGE_SIZE,
+  )
+
   const load = useCallback(
     () => listChunks(documentId, { limit: CHUNK_PAGE_SIZE, offset }),
     [documentId, offset],
@@ -60,8 +70,15 @@ function ChunkList({ documentId }: { documentId: string }) {
       <ol className="divide-y divide-slate-100">
         {page.items.map((chunk) => {
           const pages = pageRange(chunk.page_start, chunk.page_end)
+          const isFocus = chunk.ordinal === focus
           return (
-            <li key={chunk.id} className="px-5 py-4">
+            <li
+              key={chunk.id}
+              ref={isFocus ? scrollToChunk : undefined}
+              tabIndex={isFocus ? -1 : undefined}
+              aria-current={isFocus ? 'true' : undefined}
+              className={`px-5 py-4 ${isFocus ? 'bg-amber-50 outline-none ring-2 ring-amber-300 ring-inset' : ''}`}
+            >
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
                 <span className="font-semibold text-slate-700">#{chunk.ordinal + 1}</span>
                 {pages && <span>{pages}</span>}
@@ -125,6 +142,9 @@ function Metadata({ document }: { document: DocumentDetail }) {
 
 export default function DocumentDetailPage() {
   const { documentId = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  const chunkParam = Number.parseInt(searchParams.get('chunk') ?? '', 10)
+  const focusChunk = Number.isInteger(chunkParam) && chunkParam >= 0 ? chunkParam : null
   const navigate = useNavigate()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [busy, setBusy] = useState<'retry' | 'reindex' | 'delete' | null>(null)
@@ -339,7 +359,11 @@ export default function DocumentDetailPage() {
           Chunks <span className="font-normal text-slate-500">({document.chunk_count})</span>
         </h3>
         {/* Remount when a new index is committed so the chunk list is refetched. */}
-        <ChunkList key={document.processed_at ?? 'none'} documentId={document.id} />
+        <ChunkList
+          key={document.processed_at ?? 'none'}
+          documentId={document.id}
+          focus={focusChunk}
+        />
       </section>
 
       <ConfirmDialog

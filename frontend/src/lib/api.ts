@@ -252,3 +252,87 @@ export function uploadDocument(
     xhr.send(form)
   })
 }
+
+// --- Search (Phase 3) ---------------------------------------------------------------------
+
+export type SearchMode = 'semantic' | 'keyword' | 'hybrid'
+export type ScoreType = 'cosine_similarity' | 'bm25' | 'rrf'
+export type SearchLanguage = 'ja' | 'en' | 'mixed'
+
+// The first semantic search may have to load the embedding model, which takes a while.
+const SEARCH_TIMEOUT_MS = 60_000
+
+export interface SearchRequest {
+  query: string
+  mode: SearchMode
+  top_k?: number
+  document_ids?: string[]
+  language?: SearchLanguage
+  min_similarity?: number
+}
+
+export interface MethodRank {
+  rank: number
+  score: number
+}
+
+export interface SearchResult {
+  rank: number
+  score: number
+  chunk_id: string
+  document_id: string
+  filename: string
+  file_type: FileType
+  document_language: Language | null
+  page_count: number | null
+  chunk_ordinal: number
+  language: Language
+  page_start: number | null
+  page_end: number | null
+  section: string | null
+  text: string
+  snippet: string
+  snippet_start: number
+  highlights: [number, number][]
+  retrieval_methods: ('semantic' | 'keyword')[]
+  semantic: MethodRank | null
+  keyword: MethodRank | null
+}
+
+export interface SearchResponse {
+  query: string
+  mode: SearchMode
+  score_type: ScoreType
+  score_description: string
+  top_k: number
+  results: SearchResult[]
+  query_terms: string[]
+  semantic_available: boolean
+  warnings: string[]
+  request_id: string | null
+  timings_ms: Record<string, number>
+}
+
+export interface SearchOptions {
+  modes: SearchMode[]
+  default_mode: SearchMode
+  default_top_k: number
+  max_top_k: number
+  max_query_chars: number
+  rrf_k: number
+  fusion_depth: number
+}
+
+export function searchDocuments(body: SearchRequest, signal?: AbortSignal): Promise<SearchResponse> {
+  const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS)
+  return request<SearchResponse>('/api/v1/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  })
+}
+
+export function fetchSearchOptions(): Promise<SearchOptions> {
+  return request<SearchOptions>('/api/v1/search/options')
+}
