@@ -197,4 +197,4 @@ CI runs all of the above on every push to `main` and every pull request.
 
 ## License
 
-See [LICENSE](LICENSE).
+Released under the [MIT License](LICENSE).
