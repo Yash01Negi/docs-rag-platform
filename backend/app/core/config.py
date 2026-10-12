@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     search_snippet_chars: int = Field(default=280, ge=40, le=4000)
     # Load the query-embedding model when the API starts instead of on the first search.
     search_preload_model: bool = False
+    # How long a search waits for the model to finish loading before hybrid search falls
+    # back to keyword results (and semantic search answers 503). The load continues.
+    search_model_load_wait_seconds: float = Field(default=20.0, ge=0, le=600)
 
     @field_validator("log_level")
     @classmethod

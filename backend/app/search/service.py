@@ -112,11 +112,19 @@ class SearchOutcome:
 
 
 class QueryEmbedder:
-    """Loads the embedding model once and embeds queries on one dedicated thread."""
+    """Loads the embedding model once and embeds queries on one dedicated thread.
 
-    def __init__(self, provider: EmbeddingProvider) -> None:
+    The load runs as a background task. A search waits for it at most `load_wait_seconds`
+    and then reports the model as unavailable instead of hanging (the first load can mean a
+    multi-gigabyte download); the load carries on and later searches use the model.
+    """
+
+    def __init__(self, provider: EmbeddingProvider, load_wait_seconds: float = 20.0) -> None:
         self.provider = provider
+        self.load_wait_seconds = load_wait_seconds
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="query-embedder")
+        self._info: EmbeddingModelInfo | None = None
+        self._loading: asyncio.Future[EmbeddingModelInfo] | None = None
         self._failed_at: float | None = None
         self._failure: str | None = None
 
@@ -128,7 +136,22 @@ class QueryEmbedder:
             raise SearchUnavailableError(self._failure or "The embedding model is unavailable.")
 
     async def load(self) -> EmbeddingModelInfo:
+        if self._info is not None:
+            return self._info
         self._check_cooldown()
+        if self._loading is None:
+            self._loading = asyncio.ensure_future(self._load())
+            # Retrieve a failure even when every waiter has timed out, so it is not logged
+            # as "never retrieved"; _load has already recorded and logged it.
+            self._loading.add_done_callback(lambda task: task.cancelled() or task.exception())
+        try:
+            return await asyncio.wait_for(asyncio.shield(self._loading), self.load_wait_seconds)
+        except TimeoutError:
+            raise SearchUnavailableError(
+                "The embedding model is still loading; try again shortly."
+            ) from None
+
+    async def _load(self) -> EmbeddingModelInfo:
         loop = asyncio.get_running_loop()
         try:
             info = await loop.run_in_executor(self._executor, self.provider.load)
@@ -136,7 +159,10 @@ class QueryEmbedder:
             self._failed_at, self._failure = time.monotonic(), exc.message
             logger.warning("query_model_unavailable", extra={"error_code": exc.code.value})
             raise SearchUnavailableError(exc.message) from exc
+        finally:
+            self._loading = None
         self._failed_at = self._failure = None
+        self._info = info
         return info
 
     async def embed(self, query: str) -> tuple[EmbeddingModelInfo, list[float]]:
@@ -161,7 +187,7 @@ class QueryEmbedder:
 class SearchService:
     def __init__(self, settings: Settings, provider: EmbeddingProvider) -> None:
         self.settings = settings
-        self.embedder = QueryEmbedder(provider)
+        self.embedder = QueryEmbedder(provider, settings.search_model_load_wait_seconds)
 
     async def warm_up(self) -> None:
         """Load the model and the analyzer ahead of the first search (best effort)."""

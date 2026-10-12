@@ -6,6 +6,8 @@ quality. Retrieval quality with the real model is measured by ``evaluation/``.
 """
 
 import asyncio
+import threading
+import time
 import uuid
 from collections.abc import Sequence
 
@@ -21,7 +23,7 @@ from app.embeddings.fake import FakeEmbeddingProvider
 from app.ingestion.errors import ErrorCode, IngestionError
 from app.main import create_app
 from app.search.retrieval import SearchFilters
-from app.search.service import SearchMode, SearchRequest, SearchService
+from app.search.service import QueryEmbedder, SearchMode, SearchRequest, SearchService
 from tests.search_fixtures import SeedChunk, seed_document
 from tests.test_documents_api import run_worker_until_idle
 
@@ -253,6 +255,71 @@ def test_hybrid_falls_back_to_keyword_when_the_model_is_unavailable(
         assert semantic.status_code == 503
         assert semantic.json()["error"]["code"] == "semantic_search_unavailable"
         assert "Traceback" not in semantic.text
+
+
+def test_search_does_not_hang_while_the_model_is_loading(
+    make_settings, clean_database: str, corpus: dict[str, uuid.UUID]
+) -> None:
+    settings = make_settings(database_url=clean_database, search_model_load_wait_seconds=0.2)
+    provider = SlowProvider()
+    with TestClient(create_app(settings)) as client:
+        client.app.state.search.embedder.provider = provider  # type: ignore[attr-defined]
+        try:
+            hybrid = _search(client, "backups")
+            assert hybrid.status_code == 200
+            assert hybrid.json()["semantic_available"] is False
+            assert any("still loading" in w for w in hybrid.json()["warnings"])
+            assert hybrid.json()["results"][0]["chunk_id"] == str(corpus["en_backup"])
+
+            semantic = _search(client, "backups", mode="semantic")
+            assert semantic.status_code == 503
+            assert "still loading" in semantic.json()["error"]["message"]
+        finally:
+            provider.release.set()
+        # The load carried on in the background; once it finishes semantic search works.
+        for _ in range(50):
+            response = _search(client, "backups", mode="semantic")
+            if response.status_code == 200:
+                break
+            time.sleep(0.05)
+        assert response.status_code == 200
+        assert response.json()["results"][0]["retrieval_methods"] == ["semantic"]
+        assert provider.loads == 1
+
+
+def test_query_model_is_loaded_once_for_concurrent_searches() -> None:
+    provider = SlowProvider()
+    embedder = QueryEmbedder(provider, load_wait_seconds=5)
+
+    async def scenario() -> None:
+        searches = [asyncio.create_task(embedder.embed(f"query {n}")) for n in range(5)]
+        await asyncio.sleep(0.05)
+        provider.release.set()
+        results = await asyncio.gather(*searches)
+        assert all(len(vector) == 1024 for _, vector in results)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        embedder.close()
+    assert provider.loads == 1
+
+
+class SlowProvider(FakeEmbeddingProvider):
+    """A provider whose load blocks until the test releases it, like a model download."""
+
+    def __init__(self) -> None:
+        super().__init__(1024)
+        self.release = threading.Event()
+        self.loads = 0
+
+    def load(self) -> EmbeddingModelInfo:
+        # embed() also calls load(); count only the calls that had to wait for the model.
+        if not self.release.is_set():
+            self.loads += 1
+        if not self.release.wait(timeout=10):
+            raise IngestionError(ErrorCode.EMBEDDING_MODEL_UNAVAILABLE, "Test load timed out.")
+        return super().load()
 
 
 class BrokenProvider(FakeEmbeddingProvider):
