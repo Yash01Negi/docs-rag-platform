@@ -89,6 +89,9 @@ class Settings(BaseSettings):
     worker_preload_model: bool = False
 
     # --- Search ---
+    # Mode used when a request does not name one. Semantic scored best on the evaluation set
+    # (docs/evaluation/README.md); hybrid and keyword stay available per request.
+    search_default_mode: Literal["semantic", "keyword", "hybrid"] = "semantic"
     search_default_top_k: int = Field(default=10, ge=1, le=100)
     search_max_top_k: int = Field(default=50, ge=1, le=200)
     search_max_query_chars: int = Field(default=1000, ge=10, le=10000)

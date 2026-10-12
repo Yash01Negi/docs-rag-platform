@@ -264,7 +264,8 @@ const SEARCH_TIMEOUT_MS = 60_000
 
 export interface SearchRequest {
   query: string
-  mode: SearchMode
+  /** Omit to use the server's default mode (SEARCH_DEFAULT_MODE). */
+  mode?: SearchMode
   top_k?: number
   document_ids?: string[]
   language?: SearchLanguage

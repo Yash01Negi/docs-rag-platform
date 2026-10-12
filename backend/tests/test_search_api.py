@@ -271,10 +271,29 @@ def test_documents_from_another_model_revision_are_excluded_from_semantic_search
 # --- hybrid search -------------------------------------------------------------------------
 
 
+def test_default_mode_is_semantic_and_configurable(
+    make_settings, clean_database: str, corpus: dict[str, uuid.UUID]
+) -> None:
+    with TestClient(create_app(make_settings(database_url=clean_database))) as client:
+        body = _search(client, "backups").json()
+        assert body["mode"] == "semantic" and body["score_type"] == "cosine_similarity"
+        assert client.get("/api/v1/search/options").json()["default_mode"] == "semantic"
+    settings = make_settings(database_url=clean_database, search_default_mode="hybrid")
+    with TestClient(create_app(settings)) as client:
+        assert _search(client, "backups").json()["mode"] == "hybrid"
+        assert client.get("/api/v1/search/options").json()["default_mode"] == "hybrid"
+    # min_similarity is checked against the mode actually used.
+    keyword = make_settings(database_url=clean_database, search_default_mode="keyword")
+    with TestClient(create_app(keyword)) as client:
+        response = _search(client, "backups", min_similarity=0.5)
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_filter"
+
+
 def test_hybrid_fuses_both_methods_with_rrf(
     db_client: TestClient, corpus: dict[str, uuid.UUID]
 ) -> None:
-    body = _search(db_client, EN_BACKUP).json()
+    body = _search(db_client, EN_BACKUP, mode="hybrid").json()
     assert body["mode"] == "hybrid" and body["score_type"] == "rrf"
     top = body["results"][0]
     assert top["chunk_id"] == str(corpus["en_backup"])
@@ -292,7 +311,7 @@ def test_hybrid_falls_back_to_keyword_when_the_model_is_unavailable(
 ) -> None:
     with TestClient(create_app(db_settings)) as client:
         client.app.state.search.embedder.provider = BrokenProvider()  # type: ignore[attr-defined]
-        response = _search(client, "backups")
+        response = _search(client, "backups", mode="hybrid")
         assert response.status_code == 200
         body = response.json()
         assert body["semantic_available"] is False
@@ -314,7 +333,7 @@ def test_search_does_not_hang_while_the_model_is_loading(
     with TestClient(create_app(settings)) as client:
         client.app.state.search.embedder.provider = provider  # type: ignore[attr-defined]
         try:
-            hybrid = _search(client, "backups")
+            hybrid = _search(client, "backups", mode="hybrid")
             assert hybrid.status_code == 200
             assert hybrid.json()["semantic_available"] is False
             assert any("still loading" in w for w in hybrid.json()["warnings"])

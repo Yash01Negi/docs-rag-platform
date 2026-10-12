@@ -51,9 +51,12 @@ class SearchBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, description="Search text in Japanese, English or both.")
-    mode: SearchMode = Field(
-        default=SearchMode.HYBRID,
-        description="`semantic` (meaning), `keyword` (words and phrases) or `hybrid` (both).",
+    mode: SearchMode | None = Field(
+        default=None,
+        description=(
+            "`semantic` (meaning), `keyword` (words and phrases) or `hybrid` (both). "
+            "Defaults to SEARCH_DEFAULT_MODE (semantic unless configured otherwise)."
+        ),
     )
     top_k: int | None = Field(
         default=None, ge=1, description="Number of results. Defaults to SEARCH_DEFAULT_TOP_K."
@@ -169,7 +172,7 @@ async def search_options(request: Request) -> SearchOptions:
     settings = request.app.state.settings
     return SearchOptions(
         modes=list(SearchMode),
-        default_mode=SearchMode.HYBRID,
+        default_mode=SearchMode(settings.search_default_mode),
         default_top_k=settings.search_default_top_k,
         max_top_k=settings.search_max_top_k,
         max_query_chars=settings.search_max_query_chars,
@@ -194,10 +197,13 @@ async def search(
     * `semantic`: BGE-M3 query embedding, exact cosine-similarity search in pgvector.
     * `keyword`: Japanese/English analyzer terms ranked with BM25; put words in `"..."` or
       `「...」` to require them as a phrase.
-    * `hybrid` (default): both, combined with Reciprocal Rank Fusion. If the embedding model
-      is unavailable, hybrid returns keyword results with `semantic_available: false`.
+    * `hybrid`: both, combined with Reciprocal Rank Fusion. If the embedding model is
+      unavailable, hybrid returns keyword results with `semantic_available: false`.
+
+    Without `mode`, SEARCH_DEFAULT_MODE applies (semantic by default).
     """
     settings = request.app.state.settings
+    mode = body.mode or SearchMode(settings.search_default_mode)
     top_k = body.top_k or settings.search_default_top_k
     if top_k > settings.search_max_top_k:
         raise ApiError(422, "invalid_top_k", f"top_k must be at most {settings.search_max_top_k}.")
@@ -207,7 +213,7 @@ async def search(
             "query_too_long",
             f"The query must be at most {settings.search_max_query_chars} characters.",
         )
-    if body.min_similarity is not None and body.mode is SearchMode.KEYWORD:
+    if body.min_similarity is not None and mode is SearchMode.KEYWORD:
         raise ApiError(
             422,
             "invalid_filter",
@@ -227,7 +233,7 @@ async def search(
             session,
             SearchRequest(
                 query=body.query,
-                mode=body.mode,
+                mode=mode,
                 top_k=top_k,
                 filters=SearchFilters(
                     document_ids=tuple(body.document_ids) if body.document_ids else None,

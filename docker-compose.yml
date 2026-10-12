@@ -70,6 +70,7 @@ services:
       EMBEDDING_LOCAL_FILES_ONLY: ${EMBEDDING_LOCAL_FILES_ONLY:-false}
       # Load the model in the background at startup instead of on the first search.
       SEARCH_PRELOAD_MODEL: ${SEARCH_PRELOAD_MODEL:-true}
+      SEARCH_DEFAULT_MODE: ${SEARCH_DEFAULT_MODE:-semantic}
       SEARCH_DEFAULT_TOP_K: ${SEARCH_DEFAULT_TOP_K:-10}
       SEARCH_FUSION_DEPTH: ${SEARCH_FUSION_DEPTH:-50}
       SEARCH_RRF_K: ${SEARCH_RRF_K:-60}

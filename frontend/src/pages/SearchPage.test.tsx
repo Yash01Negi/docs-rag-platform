@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -55,7 +55,16 @@ function LocationProbe() {
   return <output data-testid="location">{pathname + search}</output>
 }
 
-function renderPage(url = '/search') {
+function renderPage(url = '/search', defaultMode: api.SearchMode = 'semantic') {
+  vi.spyOn(api, 'fetchSearchOptions').mockResolvedValue({
+    modes: ['semantic', 'keyword', 'hybrid'],
+    default_mode: defaultMode,
+    default_top_k: 10,
+    max_top_k: 50,
+    max_query_chars: 1000,
+    rrf_k: 60,
+    fusion_depth: 50,
+  })
   vi.spyOn(api, 'listDocuments').mockResolvedValue({
     items: [makeDocument({ id: 'doc-1', filename: '検索ガイド.pdf' })],
     total: 1,
@@ -93,15 +102,18 @@ describe('SearchPage', () => {
     expect(search).not.toHaveBeenCalled()
   })
 
-  it('searches in hybrid mode by default and renders ranked results', async () => {
+  it("uses the server's default mode and renders ranked results", async () => {
     const search = vi.spyOn(api, 'searchDocuments').mockResolvedValue(response())
     const user = userEvent.setup()
-    renderPage()
+    renderPage('/search', 'hybrid')
 
+    // The selector shows the server's default once the options arrive.
+    await waitFor(() => expect(screen.getByLabelText('Hybrid')).toBeChecked())
     await user.type(screen.getByLabelText('Search query'), 'ベクトル{Enter}')
 
     const card = await screen.findByRole('article')
-    expect(search).toHaveBeenCalledWith({ query: 'ベクトル', mode: 'hybrid' }, expect.anything())
+    // No mode in the request: the server applies SEARCH_DEFAULT_MODE.
+    expect(search).toHaveBeenCalledWith({ query: 'ベクトル' }, expect.anything())
     expect(within(card).getByRole('link', { name: '検索ガイド.pdf' })).toHaveAttribute(
       'href',
       '/documents/doc-1?chunk=4',
@@ -144,9 +156,11 @@ describe('SearchPage', () => {
     renderPage('/search?q=x')
     await screen.findByRole('article')
 
-    screen.getByLabelText('Hybrid').focus()
-    await user.keyboard('{ArrowRight}')
     expect(screen.getByLabelText('Semantic')).toBeChecked()
+    screen.getByLabelText('Semantic').focus()
+    await user.keyboard('{ArrowRight}')
+    expect(screen.getByLabelText('Hybrid')).toBeChecked()
+    expect(screen.getByTestId('location')).toHaveTextContent('mode=hybrid')
   })
 
   it('shows a message when nothing matches', async () => {

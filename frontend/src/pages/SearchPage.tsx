@@ -6,6 +6,7 @@ import SearchResultCard from '../components/search/SearchResultCard'
 import {
   ApiError,
   listDocuments,
+  fetchSearchOptions,
   searchDocuments,
   type DocumentSummary,
   type SearchLanguage,
@@ -17,14 +18,15 @@ import { SCORE_LABELS } from '../lib/search'
 
 const MODES: { value: SearchMode; label: string; description: string }[] = [
   {
-    value: 'hybrid',
-    label: 'Hybrid',
-    description: 'Meaning and keywords combined (Reciprocal Rank Fusion). Recommended.',
-  },
-  {
     value: 'semantic',
     label: 'Semantic',
-    description: 'Finds passages with a similar meaning, also across Japanese and English.',
+    description:
+      'Finds passages with a similar meaning, also across Japanese and English. Scored best in our evaluation.',
+  },
+  {
+    value: 'hybrid',
+    label: 'Hybrid',
+    description: 'Meaning and keywords combined (Reciprocal Rank Fusion).',
   },
   {
     value: 'keyword',
@@ -69,7 +71,10 @@ function requestKey(...parts: (string | number)[]): string {
 export default function SearchPage() {
   const [params, setParams] = useSearchParams()
   const query = params.get('q')?.trim() ?? ''
-  const mode: SearchMode = isMode(params.get('mode')) ? (params.get('mode') as SearchMode) : 'hybrid'
+  // Without ?mode= the server's default applies; the selector shows it once known.
+  const urlMode = isMode(params.get('mode')) ? (params.get('mode') as SearchMode) : null
+  const [defaultMode, setDefaultMode] = useState<SearchMode>('semantic')
+  const mode: SearchMode = urlMode ?? defaultMode
   const language = isLanguage(params.get('lang')) ? (params.get('lang') as SearchLanguage) : ''
   const documentId = params.get('doc') ?? ''
 
@@ -86,7 +91,7 @@ export default function SearchPage() {
     setDraft(query)
   }
 
-  const currentKey = requestKey(query, mode, language, documentId, retry)
+  const currentKey = requestKey(query, urlMode ?? '', language, documentId, retry)
   let state: SearchState
   if (!query) state = { status: 'idle' }
   else if (settled?.key !== currentKey) state = { status: 'loading' }
@@ -95,6 +100,9 @@ export default function SearchPage() {
 
   useEffect(() => {
     let cancelled = false
+    fetchSearchOptions()
+      .then((options) => !cancelled && setDefaultMode(options.default_mode))
+      .catch(() => {})
     listDocuments({ limit: 100, offset: 0, status: 'completed' })
       .then((page) => !cancelled && setDocuments(page.items))
       .catch(() => !cancelled && setDocuments([]))
@@ -105,12 +113,12 @@ export default function SearchPage() {
 
   useEffect(() => {
     if (!query) return
-    const key = requestKey(query, mode, language, documentId, retry)
+    const key = requestKey(query, urlMode ?? '', language, documentId, retry)
     const controller = new AbortController()
     searchDocuments(
       {
         query,
-        mode,
+        ...(urlMode ? { mode: urlMode } : {}),
         ...(language ? { language } : {}),
         ...(documentId ? { document_ids: [documentId] } : {}),
       },
@@ -122,7 +130,7 @@ export default function SearchPage() {
         setSettled({ key, error: error instanceof Error ? error : new Error(String(error)) })
       })
     return () => controller.abort()
-  }, [query, mode, language, documentId, retry])
+  }, [query, urlMode, language, documentId, retry])
 
   function update(changes: Record<string, string>) {
     const next = new URLSearchParams(params)
@@ -140,7 +148,9 @@ export default function SearchPage() {
     update({ q: trimmed })
   }
 
-  const activeMode = MODES.find((item) => item.value === mode) ?? MODES[0]
+  // The summary names the mode the server actually used.
+  const resultMode = state.status === 'done' ? state.response.mode : mode
+  const activeMode = MODES.find((item) => item.value === resultMode) ?? MODES[0]
 
   return (
     <div className="space-y-6">
@@ -206,7 +216,7 @@ export default function SearchPage() {
                     name="mode"
                     value={item.value}
                     checked={item.value === mode}
-                    onChange={() => update({ mode: item.value === 'hybrid' ? '' : item.value })}
+                    onChange={() => update({ mode: item.value === defaultMode ? '' : item.value })}
                     aria-describedby={`mode-${item.value}-description`}
                     className="mt-0.5 accent-indigo-600"
                   />
@@ -350,7 +360,7 @@ export default function SearchPage() {
               <div className="rounded-xl border border-slate-200 bg-white px-5 py-10 text-center">
                 <p className="text-sm font-medium text-slate-800">No matching passages</p>
                 <p className="mt-1 text-sm text-slate-500">
-                  {mode === 'keyword'
+                  {resultMode === 'keyword'
                     ? 'Try other words, or semantic search to match by meaning.'
                     : 'Try different wording, remove filters, or upload more documents.'}
                 </p>
