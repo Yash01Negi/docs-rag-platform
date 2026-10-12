@@ -22,7 +22,8 @@ from app.embeddings.base import EmbeddingModelInfo
 from app.embeddings.fake import FakeEmbeddingProvider
 from app.ingestion.errors import ErrorCode, IngestionError
 from app.main import create_app
-from app.search.retrieval import SearchFilters
+from app.search.analyzer import analyze_query
+from app.search.retrieval import SearchFilters, keyword_candidates
 from app.search.service import QueryEmbedder, SearchMode, SearchRequest, SearchService
 from tests.search_fixtures import SeedChunk, seed_document
 from tests.test_documents_api import run_worker_until_idle
@@ -147,6 +148,54 @@ def test_rarer_terms_rank_higher_with_bm25(
     # "postgresql" is in two chunks, "semantic" in one: the chunk with both ranks first.
     ids = _ids(_search(db_client, "postgresql semantic", mode="keyword"))
     assert ids[0] == str(corpus["en_vector"])
+
+
+def test_bm25_computes_each_term_statistic_once(db_settings: Settings) -> None:
+    """Guard the query plan: per-term document frequencies must not be recomputed per row.
+
+    When PostgreSQL inlined the statistics CTE, the df subquery ran once per (chunk, term)
+    pair, and a query over 50,000 chunks took 25 seconds.
+    """
+    seed_document(
+        db_settings,
+        "many.txt",
+        [
+            f"Backup policy number {n} covers the database and its restore drills."
+            for n in range(40)
+        ],
+    )
+    analysis = analyze_query("database backup restore")
+    plans: list[dict] = []  # type: ignore[type-arg]
+
+    async def scenario() -> None:
+        engine = create_async_engine(db_settings)
+        try:
+            async with create_session_factory(engine)() as session:
+                execute = session.execute
+
+                async def explain(statement, params=None, *args, **kwargs):  # type: ignore[no-untyped-def]
+                    sql = "EXPLAIN (ANALYZE, FORMAT JSON) " + str(statement)
+                    result = await execute(text(sql), params)
+                    plans.append(result.scalar_one()[0]["Plan"])
+                    return await execute(statement, params, *args, **kwargs)
+
+                session.execute = explain  # type: ignore[method-assign]
+                found = await keyword_candidates(session, analysis, SearchFilters(), 10, 1.2, 0.75)
+                assert len(found) == 10
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+    def subplan_loops(node: dict) -> list[int]:  # type: ignore[type-arg]
+        loops = [node["Actual Loops"]] if node.get("Subplan Name") else []
+        for child in node.get("Plans", []):
+            loops += subplan_loops(child)
+        return loops
+
+    loops = subplan_loops(plans[0])
+    assert loops, "expected the per-term df subquery in the plan"
+    assert max(loops) <= len(analysis.terms)
 
 
 def test_quoted_phrase_requires_adjacent_words(

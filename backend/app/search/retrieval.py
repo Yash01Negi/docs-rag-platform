@@ -147,11 +147,13 @@ async def keyword_candidates(
         params["phrase_query"] = " & ".join(f"({phrase_query(p)})" for p in analysis.phrases)
         phrase_filter = " AND c.search_vector @@ CAST(:phrase_query AS tsquery)"
     # Only fixed SQL fragments are concatenated; every value is a bound parameter.
+    # MATERIALIZED makes PostgreSQL compute the corpus statistics and each term's document
+    # frequency once; inlined, the df subquery would run again for every matching row.
     sql = (
-        "WITH stats AS ("  # noqa: S608
+        "WITH stats AS MATERIALIZED ("  # noqa: S608
         "  SELECT count(*)::float8 AS n, coalesce(avg(search_length), 0)::float8 AS avgdl"
         "  FROM chunks"
-        "), terms AS ("
+        "), terms AS MATERIALIZED ("
         "  SELECT t.term, (SELECT count(*) FROM chunks x"
         "                  WHERE x.search_vector @@ CAST(t.q AS tsquery))::float8 AS df"
         "  FROM unnest(CAST(:terms AS text[]), CAST(:term_queries AS text[])) AS t(term, q)"
