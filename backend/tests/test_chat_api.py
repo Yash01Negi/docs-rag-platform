@@ -580,18 +580,9 @@ def test_stale_streaming_answers_are_expired(
         "UPDATE messages SET status = 'streaming', created_at = now() - interval '1 hour' "
         "WHERE role = 'assistant'",
     )
-    # The pre-check sees a streaming answer; the stale sweep runs when the question is stored.
-    service = client.app.state.chat  # type: ignore[attr-defined]
-
-    async def store() -> None:
-        from app.chat.service import AskRequest, RetrievalOptions
-
-        async for _ in service.answer(
-            AskRequest(uuid.UUID(conversation), "next question", None, RetrievalOptions())
-        ):
-            pass
-
-    client.portal.call(store)  # type: ignore[attr-defined]
+    # A crashed server left the answer "streaming"; it does not block the conversation.
+    events = ask_events(client, conversation, "next question?")
+    assert one(events, "done")["status"] == "complete"
     rows = query_rows(
         db_settings,
         "SELECT status, error_code FROM messages WHERE role = 'assistant' ORDER BY sequence",
