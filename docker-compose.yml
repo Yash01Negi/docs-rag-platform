@@ -6,8 +6,9 @@
 #
 # Frontend: http://localhost:5173   API: http://localhost:8000/api/v1/health
 #
-# The worker downloads BAAI/bge-m3 (about 2.3 GB) into the model-cache volume the first time
-# it processes a document. To download it ahead of time:
+# The worker and the API share BAAI/bge-m3 (about 2.3 GB) through the model-cache volume. It
+# is downloaded the first time either one loads it. To download it ahead of time (recommended,
+# so the first search does not wait for the download):
 #
 #   docker compose run --rm worker python -m app.worker prepare-model
 
@@ -52,7 +53,8 @@ services:
       context: ./backend
       target: api
     image: yashrag-backend:dev
-    # --reload with the source mounted gives a fast edit/refresh loop in development.
+    # --reload with the source mounted gives a fast edit/refresh loop in development. Each
+    # reload also reloads the embedding model, which takes a few seconds once it is cached.
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
       DATABASE_URL: *database-url
@@ -61,11 +63,28 @@ services:
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-20971520}
       WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-3}
+      # Search embeds queries with the same model and revision the worker indexes with.
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-BAAI/bge-m3}
+      EMBEDDING_MODEL_REVISION: ${EMBEDDING_MODEL_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      EMBEDDING_LOCAL_FILES_ONLY: ${EMBEDDING_LOCAL_FILES_ONLY:-false}
+      # Load the model in the background at startup instead of on the first search.
+      SEARCH_PRELOAD_MODEL: ${SEARCH_PRELOAD_MODEL:-true}
+      SEARCH_DEFAULT_TOP_K: ${SEARCH_DEFAULT_TOP_K:-10}
+      SEARCH_FUSION_DEPTH: ${SEARCH_FUSION_DEPTH:-50}
+      SEARCH_RRF_K: ${SEARCH_RRF_K:-60}
+      OMP_NUM_THREADS: ${BACKEND_TORCH_THREADS:-2}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend/app:/app/app:ro
       - uploads:/data/uploads
+      - model-cache:/models
+    # The model takes about 2.3 GB of memory in this process (and again in the worker).
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY:-4g}
     depends_on:
       db:
         condition: service_healthy
@@ -73,7 +92,7 @@ services:
         condition: service_completed_successfully
 
   # Ingestion worker: claims jobs from PostgreSQL, extracts and chunks text and runs BGE-M3.
-  # The API never loads the model. Restart or scale it independently of the API.
+  # Restart or scale it independently of the API.
   worker:
     build:
       context: ./backend
