@@ -1,0 +1,91 @@
+# TEMPORARY verification job for PR #1 (CPU-only PyTorch for the worker image).
+# The Phase 2 build environment cannot reach download.pytorch.org, so the lockfile is
+# generated and the worker image is built and measured here. Removed once verified.
+name: Worker image check (temporary)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  worker-image:
+    name: Worker image (CPU-only PyTorch)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+
+      - name: Configure the PyTorch CPU index if this commit does not have it yet
+        working-directory: backend
+        run: |
+          if ! grep -q 'pytorch-cpu' pyproject.toml; then
+            cat >> pyproject.toml <<'EOF'
+
+          [[tool.uv.index]]
+          name = "pytorch-cpu"
+          url = "https://download.pytorch.org/whl/cpu"
+          explicit = true
+
+          [tool.uv.sources]
+          torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+          EOF
+            uv lock
+            echo "LOCK_REGENERATED=1" >> "$GITHUB_ENV"
+          else
+            uv lock --check
+          fi
+
+      - name: Print the regenerated lockfile (gzip + base64)
+        if: env.LOCK_REGENERATED == '1'
+        working-directory: backend
+        run: |
+          sha256sum uv.lock
+          echo "UVLOCK-BEGIN"
+          gzip -9 -n -c uv.lock | base64 -w 0
+          echo
+          echo "UVLOCK-END"
+
+      - name: Torch entries in the lock
+        working-directory: backend
+        run: |
+          python3 - <<'EOF'
+          import tomllib
+          lock = tomllib.load(open("uv.lock", "rb"))
+          for package in lock["package"]:
+              if package["name"] in ("torch", "triton") or package["name"].startswith("nvidia"):
+                  wheels = [w["url"].rsplit("/", 1)[1] for w in package.get("wheels", [])]
+                  print(package["name"], package["version"], package.get("source"))
+                  for wheel in wheels:
+                      if "cp312" in wheel:
+                          print("   ", wheel)
+          EOF
+
+      - name: Build the worker image
+        run: docker build --target worker -t yashrag-worker:cpu backend
+
+      - name: Measure the worker image
+        run: |
+          docker image inspect yashrag-worker:cpu --format 'image size: {{.Size}} bytes'
+          docker images yashrag-worker:cpu
+          docker history yashrag-worker:cpu --format '{{.Size}}\t{{.CreatedBy}}' | cut -c1-120 | head -8
+          docker run --rm --entrypoint sh yashrag-worker:cpu -c \
+            'du -sh /opt/venv; du -sh / --exclude=/proc --exclude=/sys 2>/dev/null | tail -1;
+             ls /opt/venv/lib/python3.12/site-packages | grep -ciE "^(nvidia|triton|cuda)" || true'
+
+      - name: Torch and sentence-transformers import in the worker image
+        run: |
+          docker run --rm --entrypoint python yashrag-worker:cpu -c "
+          import torch, sentence_transformers
+          print('torch', torch.__version__, 'cuda available:', torch.cuda.is_available())
+          print('cuda build:', torch.version.cuda)
+          x = torch.randn(64, 1024)
+          print('matmul ok:', tuple((x @ x.T).shape))
+          print('sentence-transformers', sentence_transformers.__version__)
+          "
+          docker run --rm --entrypoint python yashrag-worker:cpu -m app.worker --help || true
