@@ -23,6 +23,7 @@ import {
   isActive,
   languageLabel,
   pageRange,
+  pluralize,
 } from '../lib/format'
 
 const CHUNK_PAGE_SIZE = 10
@@ -350,7 +351,7 @@ export default function DocumentDetailPage() {
         onCancel={() => setConfirmingDelete(false)}
       >
         <span className="font-medium break-all text-slate-900">{document.filename}</span>, its{' '}
-        {document.chunk_count} indexed chunks and the stored original file will be permanently
+        {pluralize(document.chunk_count, 'indexed chunk')} and the stored original file will be permanently
         deleted. This cannot be undone.
       </ConfirmDialog>
     </div>

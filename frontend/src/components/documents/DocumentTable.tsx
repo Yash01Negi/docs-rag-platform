@@ -1,7 +1,7 @@
 import { Link } from 'react-router'
 
 import type { DocumentSummary } from '../../lib/api'
-import { FILE_TYPE_LABELS, formatBytes, formatDateTime, languageLabel } from '../../lib/format'
+import { FILE_TYPE_LABELS, formatBytes, formatDateTime, languageLabel, pluralize } from '../../lib/format'
 import DocumentStatusBadge from './DocumentStatusBadge'
 
 const linkClass =
@@ -90,7 +90,7 @@ export default function DocumentTable({ documents }: { documents: DocumentSummar
             </div>
             <p className="mt-1 text-xs text-slate-500">
               {FILE_TYPE_LABELS[document.file_type]} · {formatBytes(document.size_bytes)} ·{' '}
-              {languageLabel(document.language)} · {document.chunk_count} chunks
+              {languageLabel(document.language)} · {pluralize(document.chunk_count, 'chunk')}
             </p>
             <p className="mt-0.5 text-xs text-slate-500">{formatDateTime(document.created_at)}</p>
             <ErrorSummary document={document} />

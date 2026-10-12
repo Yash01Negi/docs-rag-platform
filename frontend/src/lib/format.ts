@@ -51,3 +51,7 @@ export function pageRange(start: number | null, end: number | null): string | nu
   if (start === null) return null
   return end === null || end === start ? `p. ${start}` : `pp. ${start}–${end}`
 }
+
+export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`
+}
