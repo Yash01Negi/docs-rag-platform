@@ -72,7 +72,7 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
         </nav>
 
         <div className="border-t border-slate-200 px-5 py-4 text-xs text-slate-500">
-          <p className="font-medium text-slate-700">Phase 2 · Ingestion</p>
+          <p className="font-medium text-slate-700">Phase 3 · Retrieval</p>
           <p className="mt-0.5">日本語 / English</p>
         </div>
       </aside>

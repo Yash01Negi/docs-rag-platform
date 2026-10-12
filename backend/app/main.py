@@ -1,5 +1,6 @@
 """FastAPI application factory."""
 
+import asyncio
 import logging
 import re
 import time
@@ -13,11 +14,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.api.v1.documents import router as documents_router
 from app.api.v1.health import router as health_router
+from app.api.v1.search import router as search_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers, unhandled_exception_response
 from app.core.limits import MULTIPART_OVERHEAD_BYTES, BodySizeLimitMiddleware
 from app.core.logging import configure_logging, request_id_var
 from app.db.session import create_engine, create_session_factory
+from app.embeddings import create_embedding_provider
+from app.search.service import SearchService
 from app.services.documents import clean_staging_directory, staging_directory
 from app.storage import LocalFileStorage
 
@@ -38,6 +42,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.sessions = create_session_factory(app.state.engine)
         app.state.storage = LocalFileStorage(settings.storage_dir)
         clean_staging_directory(staging_directory(settings.storage_dir))
+        # The provider does not load the model until the first semantic search (or the
+        # warm-up below); the model libraries are imported lazily.
+        app.state.search = SearchService(settings, create_embedding_provider(settings))
+        warm_up = (
+            asyncio.create_task(app.state.search.warm_up())
+            if settings.search_preload_model
+            else None
+        )
         logger.info(
             "application_startup",
             extra={"environment": settings.environment.value, "version": __version__},
@@ -45,6 +57,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            if warm_up is not None:
+                warm_up.cancel()
+            app.state.search.close()
             await app.state.engine.dispose()
             logger.info("application_shutdown")
 
@@ -105,4 +120,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health_router, prefix=API_V1_PREFIX)
     app.include_router(documents_router, prefix=API_V1_PREFIX)
+    app.include_router(search_router, prefix=API_V1_PREFIX)
     return app

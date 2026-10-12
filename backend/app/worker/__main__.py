@@ -3,6 +3,7 @@
 python -m app.worker run             # process ingestion jobs until SIGTERM/SIGINT
 python -m app.worker prepare-model   # download and verify the embedding model
 python -m app.worker healthcheck     # exit 0 if the worker's liveness file is fresh
+python -m app.worker rebuild-search-index  # recompute keyword-search vectors of all chunks
 """
 
 import argparse
@@ -63,6 +64,21 @@ def _prepare_model() -> int:
     return 0
 
 
+def _rebuild_search_index() -> int:
+    from sqlalchemy import create_engine as create_sync_engine
+
+    from app.search.lexical_index import rebuild_lexical_index
+
+    engine = create_sync_engine(get_settings().database_url.get_secret_value())
+    try:
+        with engine.begin() as connection:
+            count = rebuild_lexical_index(connection)
+    finally:
+        engine.dispose()
+    print(f"rebuilt keyword-search vectors for {count} chunks")
+    return 0
+
+
 def _healthcheck() -> int:
     path = get_settings().worker_heartbeat_file
     if path is None:
@@ -83,7 +99,10 @@ def _healthcheck() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.worker")
     parser.add_argument(
-        "command", nargs="?", default="run", choices=["run", "prepare-model", "healthcheck"]
+        "command",
+        nargs="?",
+        default="run",
+        choices=["run", "prepare-model", "healthcheck", "rebuild-search-index"],
     )
     args = parser.parse_args(argv)
     if args.command == "healthcheck":
@@ -92,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(get_settings().log_level)
     if args.command == "prepare-model":
         return _prepare_model()
+    if args.command == "rebuild-search-index":
+        return _rebuild_search_index()
     asyncio.run(_run())
     return 0
 

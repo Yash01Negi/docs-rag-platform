@@ -1,0 +1,506 @@
+# YashRAG retrieval evaluation set.
+#
+# Every query lists the passages a person judged relevant. A passage is identified by its
+# document and an anchor: a short exact quote from the document. Chunk boundaries depend on
+# the tokenizer, so judgments never name chunks; a retrieved chunk counts as relevant when
+# it contains a judged anchor. Grades: 2 = answers the query, 1 = related but incomplete.
+#
+# Query types:
+#   exact_keyword   the query repeats words or a phrase from the passage
+#   paraphrase      same meaning, different words
+#   ja_no_spaces    Japanese written without spaces (needs morphological analysis)
+#   cross_language  the query and the relevant passage are in different languages
+#   mixed           the query mixes Japanese and English
+#   no_relevant     nothing in the corpus answers it; the ideal result is an empty list
+#   multi_relevant  more than one document holds a relevant passage
+#   distractor      another document shares the query's words but does not answer it
+#
+# `language` is the language of the query text: en, ja or mixed.
+
+version = 1
+
+# Smaller than the production default (400 tokens) so each short document becomes several
+# chunks and the evaluation ranks passages, not whole documents. The report records it.
+[chunking]
+target_tokens = 120
+overlap_tokens = 20
+min_tokens = 20
+
+# ---------------------------------------------------------------- English queries
+
+[[queries]]
+id = "en-01"
+query = "point-in-time recovery"
+language = "en"
+types = ["exact_keyword"]
+relevant = [
+  { doc = "en-backup-policy.md", anchor = "allows point-in-time recovery to any second", grade = 2 },
+]
+
+[[queries]]
+id = "en-02"
+query = "how long are database snapshots kept"
+language = "en"
+types = ["paraphrase", "distractor"]
+notes = "The SnapKeep release notes talk about backups but say nothing about retention."
+relevant = [
+  { doc = "en-backup-policy.md", anchor = "Daily snapshots are retained for 35 days", grade = 2 },
+  { doc = "en-backup-policy.md", anchor = "kept for 13 months", grade = 2 },
+]
+
+[[queries]]
+id = "en-03"
+query = "SEV1 postmortem deadline"
+language = "en"
+types = ["exact_keyword"]
+relevant = [
+  { doc = "en-incident-runbook.md", anchor = "A blameless postmortem is written", grade = 2 },
+]
+
+[[queries]]
+id = "en-04"
+query = "who keeps the outage response organized"
+language = "en"
+types = ["paraphrase"]
+relevant = [
+  { doc = "en-incident-runbook.md", anchor = "The incident commander does not debug", grade = 2 },
+]
+
+[[queries]]
+id = "en-05"
+query = "per diem"
+language = "en"
+types = ["exact_keyword"]
+relevant = [
+  { doc = "en-travel-expenses.txt", anchor = "daily per diem of 60 US dollars", grade = 2 },
+]
+
+[[queries]]
+id = "en-06"
+query = "do I need to keep the receipt for a cheap taxi ride"
+language = "en"
+types = ["paraphrase"]
+relevant = [
+  { doc = "en-travel-expenses.txt", anchor = "itemized receipt for every expense over 25 US dollars", grade = 2 },
+  { doc = "ja-expense-reimbursement.txt", anchor = "深夜の移動または重い機材", grade = 1 },
+]
+
+[[queries]]
+id = "en-07"
+query = "backup restore procedure for the production database"
+language = "en"
+types = ["exact_keyword", "distractor"]
+notes = "The SnapKeep release notes repeat 'backup' and 'restore' many times."
+relevant = [
+  { doc = "en-backup-policy.md", anchor = "replays the archived log up to the requested time", grade = 2 },
+  { doc = "en-backup-policy.md", anchor = "A restore drill is performed every quarter", grade = 1 },
+]
+
+[[queries]]
+id = "en-08"
+query = "how often do we practise recovering a database"
+language = "en"
+types = ["paraphrase", "distractor"]
+relevant = [
+  { doc = "en-backup-policy.md", anchor = "A restore drill is performed every quarter", grade = 2 },
+]
+
+[[queries]]
+id = "en-09"
+query = "hardware security keys"
+language = "en"
+types = ["exact_keyword"]
+relevant = [
+  { doc = "en-laptop-security.md", anchor = "Hardware security keys are preferred", grade = 2 },
+]
+
+[[queries]]
+id = "en-10"
+query = "what to do if my laptop is lost"
+language = "en"
+types = ["paraphrase", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "en-laptop-security.md", anchor = "within 24 hours, even if you think it is locked", grade = 2 },
+  { doc = "ja-information-security.md", anchor = "直ちに情報システム部へ報告", grade = 2 },
+]
+
+[[queries]]
+id = "en-11"
+query = "minimum password length"
+language = "en"
+types = ["multi_relevant", "cross_language"]
+relevant = [
+  { doc = "en-laptop-security.md", anchor = "at least 16 characters", grade = 2 },
+  { doc = "ja-information-security.md", anchor = "パスワードは12文字以上", grade = 2 },
+]
+
+[[queries]]
+id = "en-12"
+query = "internet allowance for working from home"
+language = "en"
+types = ["cross_language", "distractor"]
+notes = "The office guide mentions working from home but has no allowance."
+relevant = [
+  { doc = "ja-remote-work.md", anchor = "月額3,000円を支給", grade = 2 },
+]
+
+[[queries]]
+id = "en-13"
+query = "how many days a week can I work remotely"
+language = "en"
+types = ["cross_language", "paraphrase"]
+relevant = [
+  { doc = "ja-remote-work.md", anchor = "週3日まで", grade = 2 },
+]
+
+[[queries]]
+id = "en-14"
+query = "quarterly earnings forecast"
+language = "en"
+types = ["no_relevant"]
+relevant = []
+
+[[queries]]
+id = "en-15"
+query = "Kubernetes pod autoscaling thresholds"
+language = "en"
+types = ["no_relevant"]
+notes = "Near the deployment guide's topic, which never mentions autoscaling."
+relevant = []
+
+[[queries]]
+id = "en-16"
+query = "status page update frequency"
+language = "en"
+types = ["exact_keyword"]
+relevant = [
+  { doc = "en-incident-runbook.md", anchor = "updates the status page every thirty minutes", grade = 2 },
+]
+
+[[queries]]
+id = "en-17"
+query = "canary deployment error threshold"
+language = "en"
+types = ["cross_language"]
+relevant = [
+  { doc = "mixed-deployment-guide.md", anchor = "エラー率が1%を超えた場合は自動的に rollback", grade = 2 },
+]
+
+[[queries]]
+id = "en-18"
+query = "API rate limit"
+language = "en"
+types = ["exact_keyword"]
+relevant = [
+  { doc = "mixed-api-guide.md", anchor = "毎分600リクエストの rate limit", grade = 2 },
+]
+
+[[queries]]
+id = "en-19"
+query = "deadline for installing operating system updates"
+language = "en"
+types = ["paraphrase"]
+relevant = [
+  { doc = "en-laptop-security.md", anchor = "installed within 14 days of release", grade = 2 },
+]
+
+[[queries]]
+id = "en-20"
+query = "how to verify webhook signatures"
+language = "en"
+types = ["cross_language"]
+relevant = [
+  { doc = "mixed-api-guide.md", anchor = "HMAC-SHA256 の署名", grade = 2 },
+]
+
+[[queries]]
+id = "en-21"
+query = "\"incident commander\""
+language = "en"
+types = ["exact_keyword"]
+notes = "Quoted phrase query."
+relevant = [
+  { doc = "en-incident-runbook.md", anchor = "has an incident commander who coordinates the response", grade = 2 },
+]
+
+# --------------------------------------------------------------- Japanese queries
+
+[[queries]]
+id = "ja-01"
+query = "在宅勤務の申請期限"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-remote-work.md", anchor = "前日の17時までに勤怠システムで申請", grade = 2 },
+]
+
+[[queries]]
+id = "ja-02"
+query = "通信費手当"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-remote-work.md", anchor = "月額3,000円を支給", grade = 2 },
+]
+
+[[queries]]
+id = "ja-03"
+query = "家で仕事をするときに公共のWi-Fiを使ってもいいですか"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-remote-work.md", anchor = "必ず会社指定のVPNを使用", grade = 2 },
+]
+
+[[queries]]
+id = "ja-04"
+query = "パスワードの最低文字数"
+language = "ja"
+types = ["ja_no_spaces", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "ja-information-security.md", anchor = "パスワードは12文字以上", grade = 2 },
+  { doc = "en-laptop-security.md", anchor = "at least 16 characters", grade = 2 },
+]
+
+[[queries]]
+id = "ja-05"
+query = "パソコンをなくしたときの連絡先"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "ja-information-security.md", anchor = "直ちに情報システム部へ報告", grade = 2 },
+  { doc = "en-laptop-security.md", anchor = "within 24 hours, even if you think it is locked", grade = 2 },
+]
+
+[[queries]]
+id = "ja-06"
+query = "障害発生時の第一報"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-incident-handling.md", anchor = "15分以内に障害対応チャンネルで第一報", grade = 2 },
+]
+
+[[queries]]
+id = "ja-07"
+query = "障害の振り返りはいつまでに行うか"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "ja-incident-handling.md", anchor = "復旧後一週間以内に振り返り会", grade = 2 },
+  { doc = "en-incident-runbook.md", anchor = "A blameless postmortem is written", grade = 2 },
+]
+
+[[queries]]
+id = "ja-08"
+query = "領収書が必要な金額"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "ja-expense-reimbursement.txt", anchor = "5,000円以上の支出", grade = 2 },
+  { doc = "en-travel-expenses.txt", anchor = "itemized receipt for every expense over 25 US dollars", grade = 1 },
+]
+
+[[queries]]
+id = "ja-09"
+query = "経費精算の締め切り"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces"]
+notes = "The document says 期限, not 締め切り."
+relevant = [
+  { doc = "ja-expense-reimbursement.txt", anchor = "翌月10日までに経費精算システムで申請", grade = 2 },
+  { doc = "en-travel-expenses.txt", anchor = "within 30 days of the end of the trip", grade = 1 },
+]
+
+[[queries]]
+id = "ja-10"
+query = "タクシー代は精算できますか"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-expense-reimbursement.txt", anchor = "深夜の移動または重い機材", grade = 2 },
+]
+
+[[queries]]
+id = "ja-11"
+query = "データベースのバックアップの保存期間"
+language = "ja"
+types = ["cross_language", "ja_no_spaces", "distractor"]
+notes = "The disaster manual mentions バックアップ and 復旧 in another sense."
+relevant = [
+  { doc = "en-backup-policy.md", anchor = "Daily snapshots are retained for 35 days", grade = 2 },
+  { doc = "en-backup-policy.md", anchor = "kept for 13 months", grade = 2 },
+]
+
+[[queries]]
+id = "ja-12"
+query = "不審なメールを受け取ったらどうする"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-information-security.md", anchor = "リンクを開かずに情報システム部へ転送", grade = 2 },
+]
+
+[[queries]]
+id = "ja-13"
+query = "退職者のアカウント無効化"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-information-security.md", anchor = "最終出社日の翌日までに無効化", grade = 2 },
+]
+
+[[queries]]
+id = "ja-14"
+query = "社員食堂の今週のメニュー"
+language = "ja"
+types = ["no_relevant", "ja_no_spaces"]
+relevant = []
+
+[[queries]]
+id = "ja-15"
+query = "停電時のサーバー対策"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-disaster-preparedness.md", anchor = "無停電電源装置を設置", grade = 2 },
+]
+
+[[queries]]
+id = "ja-16"
+query = "本番データを変更する作業のルール"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-incident-handling.md", anchor = "必ず作業手順書を作成してから行う", grade = 2 },
+  { doc = "ja-incident-handling.md", anchor = "原則として二人以上で実施", grade = 1 },
+]
+
+[[queries]]
+id = "ja-17"
+query = "地震のときエレベーターを使ってよいか"
+language = "ja"
+types = ["exact_keyword", "ja_no_spaces"]
+relevant = [
+  { doc = "ja-disaster-preparedness.md", anchor = "エレベーターは使用しない", grade = 2 },
+]
+
+[[queries]]
+id = "ja-18"
+query = "出張の日当はいくら"
+language = "ja"
+types = ["paraphrase", "ja_no_spaces", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "ja-expense-reimbursement.txt", anchor = "一泊につき2,000円", grade = 2 },
+  { doc = "en-travel-expenses.txt", anchor = "daily per diem of 60 US dollars", grade = 2 },
+]
+
+[[queries]]
+id = "ja-19"
+query = "「振り返り会」"
+language = "ja"
+types = ["exact_keyword"]
+notes = "Quoted phrase query."
+relevant = [
+  { doc = "ja-incident-handling.md", anchor = "復旧後一週間以内に振り返り会", grade = 2 },
+]
+
+# ------------------------------------------------------------------ Mixed queries
+
+[[queries]]
+id = "mx-01"
+query = "helm rollback の手順"
+language = "mixed"
+types = ["mixed", "exact_keyword"]
+relevant = [
+  { doc = "mixed-deployment-guide.md", anchor = "helm rollback コマンドで直前の revision に戻す", grade = 2 },
+]
+
+[[queries]]
+id = "mx-02"
+query = "access token の有効期限"
+language = "mixed"
+types = ["mixed", "exact_keyword"]
+relevant = [
+  { doc = "mixed-api-guide.md", anchor = "access token の有効期限は1時間", grade = 2 },
+]
+
+[[queries]]
+id = "mx-03"
+query = "HTTP 429 が返ってきたらどうする"
+language = "mixed"
+types = ["mixed", "exact_keyword"]
+relevant = [
+  { doc = "mixed-api-guide.md", anchor = "Retry-After ヘッダーの秒数だけ待って", grade = 2 },
+]
+
+[[queries]]
+id = "mx-04"
+query = "values.yaml を変更するときのレビュー"
+language = "mixed"
+types = ["mixed", "exact_keyword"]
+relevant = [
+  { doc = "mixed-deployment-guide.md", anchor = "二人の approve を得てからマージ", grade = 2 },
+]
+
+[[queries]]
+id = "mx-05"
+query = "未完成の機能を隠したまま deploy する方法"
+language = "mixed"
+types = ["mixed", "paraphrase"]
+relevant = [
+  { doc = "mixed-deployment-guide.md", anchor = "feature flag で無効化した状態でデプロイ", grade = 2 },
+]
+
+[[queries]]
+id = "mx-06"
+query = "pagination の next_cursor"
+language = "mixed"
+types = ["mixed", "exact_keyword"]
+relevant = [
+  { doc = "mixed-api-guide.md", anchor = "next_cursor を次のリクエストに渡す", grade = 2 },
+]
+
+[[queries]]
+id = "mx-07"
+query = "MFA は必須ですか"
+language = "mixed"
+types = ["mixed", "multi_relevant", "cross_language"]
+relevant = [
+  { doc = "ja-information-security.md", anchor = "多要素認証を必須とする", grade = 2 },
+  { doc = "en-laptop-security.md", anchor = "Multi-factor authentication (MFA) is mandatory", grade = 2 },
+]
+
+[[queries]]
+id = "mx-08"
+query = "PostgreSQL の restore drill の頻度"
+language = "mixed"
+types = ["mixed", "cross_language", "distractor"]
+relevant = [
+  { doc = "en-backup-policy.md", anchor = "A restore drill is performed every quarter", grade = 2 },
+]
+
+[[queries]]
+id = "mx-09"
+query = "API の破壊的変更と versioning"
+language = "mixed"
+types = ["mixed", "exact_keyword"]
+relevant = [
+  { doc = "mixed-api-guide.md", anchor = "少なくとも12か月間サポート", grade = 2 },
+]
+
+[[queries]]
+id = "mx-10"
+query = "Slack bot の設定方法"
+language = "mixed"
+types = ["mixed", "no_relevant"]
+relevant = []
+
+[[queries]]
+id = "mx-11"
+query = "SEV1 のときの status page 更新"
+language = "mixed"
+types = ["mixed", "cross_language"]
+relevant = [
+  { doc = "en-incident-runbook.md", anchor = "updates the status page every thirty minutes", grade = 2 },
+]

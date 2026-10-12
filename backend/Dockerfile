@@ -1,10 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# Two images from one Dockerfile:
-#   --target api     (default) FastAPI app and migrations; no model libraries
-#   --target worker  ingestion worker with the optional 'embeddings' extra (PyTorch,
-#                    sentence-transformers). Model weights are NOT baked in: they are
-#                    downloaded at runtime into the model-cache volume.
+# Two images from one Dockerfile, sharing their dependency layers:
+#   --target api     (default) FastAPI app and migrations
+#   --target worker  ingestion worker
+# Both install the optional 'embeddings' extra (CPU-only PyTorch, sentence-transformers):
+# the worker embeds chunks and the API embeds search queries with the same model. Model
+# weights are NOT baked in: they are downloaded at runtime into the model-cache volume.
 
 FROM python:3.12-slim AS base
 
@@ -30,12 +31,8 @@ RUN useradd --create-home --uid 10001 appuser \
 
 COPY pyproject.toml uv.lock README.md ./
 
-
-FROM base AS worker
-
 ENV MODEL_CACHE_DIR=/models \
-    HF_HOME=/models/huggingface \
-    WORKER_HEARTBEAT_FILE=/tmp/yashrag-worker.alive
+    HF_HOME=/models/huggingface
 
 RUN mkdir -p /models && chown appuser:appuser /models
 
@@ -44,6 +41,11 @@ RUN uv sync --locked --no-dev --extra embeddings --no-install-project
 
 COPY app ./app
 RUN uv sync --locked --no-dev --extra embeddings --no-editable
+
+
+FROM base AS worker
+
+ENV WORKER_HEARTBEAT_FILE=/tmp/yashrag-worker.alive
 
 USER appuser
 
@@ -54,12 +56,6 @@ CMD ["python", "-m", "app.worker", "run"]
 
 
 FROM base AS api
-
-# Install locked runtime dependencies first so this layer is cached across code changes.
-RUN uv sync --locked --no-dev --no-install-project
-
-COPY app ./app
-RUN uv sync --locked --no-dev --no-editable
 
 COPY alembic.ini ./
 COPY alembic ./alembic

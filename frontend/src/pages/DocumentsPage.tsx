@@ -58,8 +58,8 @@ export default function DocumentsPage() {
         <h2 className="text-2xl font-semibold tracking-tight text-slate-900">Documents</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
           Upload Japanese and English documents. Each upload is validated, split into chunks and
-          embedded by the background ingestion worker. Searching and chatting over these
-          documents arrives in a later milestone.
+          embedded by the background ingestion worker. Indexed documents can be searched on the
+          Search page; chatting over them arrives in a later milestone.
         </p>
       </section>
 

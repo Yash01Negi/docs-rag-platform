@@ -14,12 +14,12 @@ const IMPLEMENTED = [
   'Document upload for PDF, Markdown and text (Phase 2)',
   'Japanese/English chunking and local BGE-M3 embeddings in pgvector (Phase 2)',
   'Background ingestion worker with retries and reindexing (Phase 2)',
+  'Semantic, Japanese/English keyword and hybrid (RRF) search (Phase 3)',
 ]
 
 const PLANNED = [
-  'Hybrid retrieval (vector + keyword) with reranking',
   'Grounded answers with citations',
-  'Retrieval and answer-quality evaluation',
+  'Evaluation dashboard and answer-quality evaluation',
 ]
 
 export default function DashboardPage() {
@@ -43,8 +43,8 @@ export default function DashboardPage() {
         <h2 className="text-2xl font-semibold tracking-tight text-slate-900">Welcome to YashRAG</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
           A bilingual (Japanese/English) document intelligence platform built on retrieval-augmented
-          generation. Phases 1 and 2 are in place: the platform services run, and documents can be
-          uploaded, chunked and embedded. Retrieval, chat and evaluation arrive in later milestones.
+          generation. Phases 1 to 3 are in place: documents can be uploaded, chunked, embedded and
+          searched by meaning, keywords or both. Chat and evaluation arrive in later milestones.
         </p>
       </section>
 
@@ -129,7 +129,7 @@ export default function DashboardPage() {
         <h3 id="modules-heading" className="text-sm font-semibold text-slate-900">
           Modules
         </h3>
-        <div className="mt-3 grid gap-4 sm:grid-cols-3">
+        <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {NAV_ITEMS.filter((item) => item.to !== '/').map(({ to, label, icon: ItemIcon, available }) => (
             <Link
               key={to}
