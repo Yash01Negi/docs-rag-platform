@@ -8,17 +8,18 @@ English documents, ask questions in either language, and get answers grounded in
 documents with citations, backed by an evaluation suite that measures retrieval and answer
 quality.
 
-> **Status: Phase 2 (Ingestion) is implemented.** You can upload Japanese, English and
-> mixed PDF, Markdown and text files; a background worker extracts, chunks and embeds them
-> with a locally run BAAI/bge-m3 model into pgvector, and a Documents UI manages them.
-> **Nothing reads the index yet:** retrieval, chat, citations and evaluation are not
-> implemented, and are marked as planned in the UI.
+> **Status: Phase 3 (Retrieval) is implemented.** You can upload Japanese, English and
+> mixed PDF, Markdown and text files, and search them by meaning (semantic search with a
+> locally run BAAI/bge-m3), by words and phrases (BM25 keyword search with Japanese
+> morphological analysis), or both (hybrid search with Reciprocal Rank Fusion), from the API
+> or the Search page. **There is no chat or answer generation yet:** search returns stored
+> passages only.
 >
-> **Real model:** BGE-M3 was verified on CPU on a GitHub Actions Linux runner (revision
-> `5617a9f61b028005a4858fdac845db406aefb181`): the [real-model smoke test](#real-model-smoke-test)
-> passed, and an English and a Japanese PDF were indexed into 1024-dimension, unit-norm
-> vectors. It was not run on Apple Silicon (MPS) or inside the Docker worker. See
-> [ADR 0003](docs/decisions/0003-local-bge-m3.md).
+> **Measured, not assumed:** a judged bilingual evaluation set (51 queries) was run with the
+> real model on GitHub Actions. Semantic search scored best (nDCG@10 0.927, hybrid 0.874,
+> keyword 0.802) and is the default mode. See [docs/evaluation/](docs/evaluation/README.md)
+> and [ADR 0006](docs/decisions/0006-hybrid-retrieval.md). BGE-M3 has been run on CPU only
+> (GitHub Actions), not on Apple Silicon (MPS) or inside the Docker containers.
 
 ## Implementation status
 
@@ -42,10 +43,16 @@ quality.
 | Documents UI (drag-and-drop upload, library, details, status polling) | ✅ Implemented |
 | Frontend unit tests (Vitest + Testing Library) | ✅ Implemented |
 | OCR for scanned PDFs | ❌ Not planned yet |
-| Approximate nearest-neighbour (HNSW/IVFFlat) index | 🕒 Planned with retrieval |
-| Hybrid retrieval (vector + keyword) and reranking | 🕒 Planned |
+| Semantic search (BGE-M3 query embeddings, exact cosine similarity in pgvector) | ✅ Implemented (real model evaluated on CPU) |
+| Japanese/English keyword search (Sudachi + Snowball, BM25, quoted phrases) | ✅ Implemented |
+| Hybrid search with Reciprocal Rank Fusion | ✅ Implemented |
+| `POST /api/v1/search` with filters, snippets, highlights, scores and method ranks | ✅ Implemented |
+| Search page (modes, filters, result cards linking to the source chunk) | ✅ Implemented |
+| Retrieval evaluation (51 judged EN/JA/mixed queries; Recall, Precision, MRR, nDCG, latency) | ✅ Implemented and run with the real model |
+| Approximate nearest-neighbour (HNSW) index | ⏸️ Not needed yet: exact search measured and chosen ([ADR 0006](docs/decisions/0006-hybrid-retrieval.md)) |
+| Reranking model | ⏸️ Not added: no measured need yet ([ADR 0006](docs/decisions/0006-hybrid-retrieval.md)) |
 | Chat with grounded answers and citations | 🕒 Planned |
-| Retrieval and answer-quality evaluation | 🕒 Planned |
+| Answer-quality evaluation | 🕒 Planned |
 | Authentication | 🕒 Planned |
 | AWS deployment | 🕒 Planned |
 
@@ -54,7 +61,8 @@ quality.
 | Layer | Technology |
 | --- | --- |
 | Backend | Python 3.12, FastAPI, Pydantic v2, pydantic-settings, Uvicorn, pypdfium2 (PDFium) |
-| Embeddings (worker only) | BAAI/bge-m3 via sentence-transformers and PyTorch (CPU, or Apple MPS on the host) |
+| Embeddings (worker and API) | BAAI/bge-m3 via sentence-transformers and PyTorch (CPU, or Apple MPS on the host) |
+| Keyword search | SudachiPy + sudachidict-core (Japanese), snowballstemmer (English), PostgreSQL `tsvector` + GIN, BM25 in SQL |
 | Database | PostgreSQL 17, pgvector 0.8.1, SQLAlchemy 2 (async), psycopg 3, Alembic |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, React Router |
 | Tooling | uv (locked Python dependencies), Ruff (lint + format), pytest, oxlint, Vitest, Docker Compose, GitHub Actions |
@@ -65,7 +73,8 @@ quality.
 flowchart LR
     browser([Browser]) --> fe["Frontend<br/>React + Vite"]
     fe -- "/api/*" --> be["API<br/>FastAPI"]
-    be --> db[("PostgreSQL<br/>+ pgvector")]
+    be --> db[("PostgreSQL<br/>+ pgvector + tsvector")]
+    cache2[("model cache<br/>volume")] --> be
     be -- "store original" --> files[("uploads<br/>volume")]
     worker["Ingestion worker<br/>extract · chunk · BGE-M3"] -- "claim jobs · write chunks" --> db
     files --> worker
@@ -73,10 +82,11 @@ flowchart LR
     mig["Alembic<br/>migrations"] --> db
 ```
 
-- The **frontend** has a working Documents area (upload, library, details) and a dashboard
-  with live backend status. Chat and Evaluation are labelled placeholders.
-- The **API** validates and stores uploads, queues ingestion jobs in PostgreSQL and serves
-  document data. It never loads the embedding model.
+- The **frontend** has a Documents area (upload, library, details), a Search page and a
+  dashboard with live backend status. Chat and Evaluation are labelled placeholders.
+- The **API** validates and stores uploads, queues ingestion jobs in PostgreSQL, serves
+  document data, and runs search. It loads BGE-M3 once to embed search queries, on a
+  dedicated thread.
 - The **worker** is a separate process that claims jobs, extracts text, chunks it, embeds it
   with BAAI/bge-m3 and writes chunks and vectors in one transaction.
 - The **database** is PostgreSQL with pgvector
@@ -85,11 +95,14 @@ flowchart LR
 
 More detail: [docs/architecture.md](docs/architecture.md) ·
 [docs/ingestion-pipeline.md](docs/ingestion-pipeline.md) ·
+[docs/retrieval.md](docs/retrieval.md) ·
+[docs/evaluation/](docs/evaluation/README.md) ·
 Decisions: [docs/decisions/](docs/decisions/)
 
 ```text
 docs-rag-platform/
-├── backend/             FastAPI app, ingestion worker, Alembic migrations, tests
+├── backend/             FastAPI app, ingestion worker, search, Alembic migrations, tests
+│   └── evaluation/      Judged evaluation set, metrics, harness and benchmarks
 ├── frontend/            React + TypeScript + Vite app
 ├── docs/                Architecture notes and decision records
 ├── infra/               Deployment configuration (planned)
@@ -232,6 +245,15 @@ All configuration is read from environment variables (or `.env`). See
 | `WORKER_HEARTBEAT_FILE` | no | File touched by the worker for health checks. Set in the Docker image. |
 | `WORKER_PRELOAD_MODEL` | no | Load the model at startup instead of on the first job. Default `false`. |
 | `WORKER_CPUS` / `WORKER_MEMORY` / `WORKER_TORCH_THREADS` | Compose only | Worker container CPU and memory limits and PyTorch threads. Defaults `4` / `6g` / `4`. |
+| `SEARCH_DEFAULT_MODE` | no | Mode for requests that name none: `semantic` (default), `keyword` or `hybrid`. |
+| `SEARCH_DEFAULT_TOP_K` / `SEARCH_MAX_TOP_K` | no | Default and maximum number of results. Defaults `10` / `50`. |
+| `SEARCH_MAX_QUERY_CHARS` | no | Longest accepted query. Default `1000`. |
+| `SEARCH_FUSION_DEPTH` / `SEARCH_RRF_K` | no | Candidates per method for hybrid search, and the RRF constant. Defaults `50` / `60`. |
+| `SEARCH_BM25_K1` / `SEARCH_BM25_B` | no | BM25 parameters. Defaults `1.2` / `0.75`. |
+| `SEARCH_SNIPPET_CHARS` | no | Snippet length. Default `280`. |
+| `SEARCH_PRELOAD_MODEL` | no | Load the model when the API starts. Default `false`; Compose uses `true`. |
+| `SEARCH_MODEL_LOAD_WAIT_SECONDS` | no | How long a search waits for a model load in progress. Default `20`. |
+| `BACKEND_MEMORY` / `BACKEND_TORCH_THREADS` | Compose only | API container memory limit and PyTorch threads. Defaults `4g` / `2`. |
 
 ## Testing
 
@@ -270,6 +292,27 @@ uv sync --extra embeddings
 RUN_MODEL_TESTS=1 uv run --extra embeddings pytest -m model
 ```
 
+#### Retrieval evaluation
+
+`backend/evaluation/` holds a judged evaluation set (13 documents, 51 English, Japanese and
+mixed queries) and a harness that indexes it through the worker pipeline and reports
+Recall@k, Precision@k, MRR@k, nDCG@k and latency per mode, language and query type. It needs
+a migrated database whose name ends in `_eval` or `_test` (`--reset` deletes its documents):
+
+```bash
+createdb yashrag_eval   # or CREATE DATABASE yashrag_eval in psql
+DATABASE_URL=postgresql+psycopg://…/yashrag_eval uv run alembic upgrade head
+# All modes with the real model (needs the embeddings extra and the model download):
+DATABASE_URL=postgresql+psycopg://…/yashrag_eval uv run --extra embeddings python -m evaluation.run --reset
+# Keyword mode only, without the model:
+DATABASE_URL=postgresql+psycopg://…/yashrag_eval ENVIRONMENT=test EMBEDDING_PROVIDER=fake \
+  uv run python -m evaluation.run --reset --modes keyword
+```
+
+Benchmarks: `python -m evaluation.ann_benchmark` (exact vs HNSW vector search) and
+`python -m evaluation.keyword_benchmark` (keyword latency vs corpus size). Results and how
+to read them: [docs/evaluation/](docs/evaluation/README.md).
+
 Frontend (from `frontend/`):
 
 ```bash
@@ -284,10 +327,18 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 
 ## Current limitations
 
-- **No retrieval, chat, citations or evaluation.** Documents are indexed, but nothing
-  searches the vectors yet, and there is no approximate nearest-neighbour index.
+- **No chat, answer generation or citations yet.** Search returns stored passages only.
+- **Semantic search is exact.** Latency grows linearly with the number of chunks (about
+  50 ms at 10,000 and 620 to 670 ms at 100,000 on 4 vCPUs); an HNSW index is the planned
+  next step past roughly 17,000 chunks ([ADR 0006](docs/decisions/0006-hybrid-retrieval.md)).
+- **Semantic and hybrid search always return results**, even when no document answers the
+  query, unless `min_similarity` is set. Keyword search does not match across languages.
+- **The evaluation set is small** (51 queries, written for this project), with few
+  identifier-style queries. Treat its numbers as a regression baseline, not a benchmark.
+- More details: [docs/retrieval.md](docs/retrieval.md#known-limitations).
 - Real BGE-M3 has been run on CPU only (GitHub Actions); MPS on Apple Silicon and the
-  Docker worker with the real model have not been tested. No throughput was measured.
+  Docker containers with the real model have not been tested. The API and the worker each
+  hold a copy of the model in memory (about 2.3 GB each).
 - No OCR: scanned PDFs fail with `no_extractable_text`. Only PDF, Markdown and plain text.
 - Dense vectors only; no sparse or multi-vector (ColBERT) retrieval.
 - No authentication or authorization, and therefore no per-user documents: anyone who can
@@ -302,8 +353,9 @@ every pull request, plus `alembic check` and Docker Compose config validation.
   Paragraphs are rebuilt from line spacing and font size, so unusual layouts (multi-column
   pages, tables) may be split differently from how they look.
 - The Docker setup is for local development only (Vite dev server, `uvicorn --reload`,
-  source mounts). The worker image is about 1.3 GB because it contains PyTorch (CPU-only).
-  Building it needs access to `download.pytorch.org`.
+  source mounts). The API and worker images are about 1.5 GB each (measured on GitHub
+  Actions) because they contain PyTorch (CPU-only) and the Sudachi dictionary; they share
+  their dependency layers. Building them needs access to `download.pytorch.org`.
 - The UI is in English only.
 
 ## Roadmap
@@ -311,10 +363,10 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 1. Foundation | Monorepo, FastAPI, PostgreSQL + pgvector, migrations, app shell, Docker, CI | ✅ Done |
-| 2. Ingestion | Document upload, JA/EN parsing and chunking, local BGE-M3 embeddings, worker, Documents UI | ✅ Implemented |
-| 3. Retrieval | Vector + keyword hybrid search, ANN index, reranking, retrieval API | 🕒 Next |
-| 4. Chat | Grounded answer generation with citations, chat UI | 🕒 Planned |
-| 5. Evaluation | Bilingual evaluation set, retrieval and answer-quality metrics, evaluation UI | 🕒 Planned |
+| 2. Ingestion | Document upload, JA/EN parsing and chunking, local BGE-M3 embeddings, worker, Documents UI | ✅ Done |
+| 3. Retrieval | Semantic, bilingual keyword and hybrid search, search API and UI, retrieval evaluation | ✅ Implemented |
+| 4. Chat | Grounded answer generation with citations, chat UI | 🕒 Next |
+| 5. Evaluation | Answer-quality metrics, evaluation UI (retrieval metrics exist since Phase 3) | 🕒 Planned |
 | 6. Deployment | Production images, AWS infrastructure, monitoring | 🕒 Planned |
 
 ## License

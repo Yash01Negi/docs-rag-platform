@@ -37,7 +37,9 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
 - Only the dense output is used. Sparse and multi-vector retrieval are out of scope; the
   weight download skips the ColBERT and sparse heads and the ONNX export.
 - The model runs through `sentence-transformers` and PyTorch, which are an **optional
-  dependency extra** (`embeddings`). The API process and CI never install them.
+  dependency extra** (`embeddings`). CI never installs them. *(Phase 3 update: the API
+  process now installs the extra too, because semantic search embeds queries with the same
+  model; see [ADR 0006](0006-hybrid-retrieval.md).)*
 - The provider sits behind an `EmbeddingProvider` interface (`app/embeddings/base.py`) with
   a deterministic fake implementation for tests. The fake is refused at startup unless
   `ENVIRONMENT=test`, so it cannot silently produce a production index.
@@ -70,7 +72,7 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
   on the [model card](https://huggingface.co/BAAI/bge-m3) before redistributing the weights.
 - The weights are not stored in this repository and not baked into any image.
 - `sentence-transformers` (Apache-2.0) and PyTorch (BSD-3-Clause) are runtime dependencies
-  of the worker only.
+  of the worker and, since Phase 3, of the API (for query embeddings).
 
 ## Consequences
 

@@ -1,8 +1,9 @@
 # Architecture
 
-This document describes what exists after **Phase 2 (Ingestion)** and where planned
+This document describes what exists after **Phase 3 (Retrieval)** and where planned
 components will fit. Anything marked *planned* is not implemented yet. The ingestion
-pipeline itself is described in detail in [ingestion-pipeline.md](ingestion-pipeline.md).
+pipeline is described in detail in [ingestion-pipeline.md](ingestion-pipeline.md), and
+search in [retrieval.md](retrieval.md).
 
 ## System overview
 
@@ -13,6 +14,7 @@ flowchart LR
     subgraph frontend["frontend/ · React + TypeScript + Vite"]
         shell["App shell + dashboard<br/>live backend status"]
         docsui["Documents UI<br/>upload · library · details"]
+        searchui["Search UI<br/>modes · filters · result cards"]
     end
 
     subgraph backend["backend/ · FastAPI (Python 3.12)"]
@@ -20,31 +22,38 @@ flowchart LR
         health["/health · /ready"]
         docsapi["/documents API<br/>upload · list · chunks · file<br/>retry · reindex · delete"]
         svc["services/documents.py<br/>validation · dedup · queueing"]
+        searchapi["/search API"]
+        search["search/<br/>analyzer · BM25 · cosine · RRF · snippets"]
+        qmodel["BGE-M3 query embedder<br/>(one thread)"]
     end
 
     subgraph workerp["Ingestion worker · python -m app.worker"]
         runner["Job runner<br/>claim · lease · retry · recover"]
-        pipe["Extract → chunk → embed"]
+        pipe["Extract → chunk → embed<br/>+ keyword terms (Sudachi)"]
         model["BAAI/bge-m3<br/>(sentence-transformers + PyTorch)"]
     end
 
     subgraph data["PostgreSQL 17 + pgvector"]
-        pg[("documents · chunks vector(1024)<br/>ingestion_jobs")]
+        pg[("documents · chunks<br/>vector(1024) + tsvector (GIN)<br/>ingestion_jobs")]
     end
 
     files[("Original files<br/>LocalFileStorage")]
     cache[("Model cache")]
 
+    evalh["evaluation/<br/>judged EN/JA queries · metrics"]
+
     subgraph later["Planned (later phases)"]
-        retrieval["Hybrid retrieval<br/>+ reranking"]
         answer["Answer generation<br/>with citations"]
-        evaluation["Evaluation harness"]
     end
 
     user --> shell
     user --> docsui
-    shell & docsui -- "/api/*" --> mw
-    mw --> health & docsapi
+    user --> searchui
+    shell & docsui & searchui -- "/api/*" --> mw
+    mw --> health & docsapi & searchapi
+    searchapi --> search --> pg
+    search --> qmodel
+    cache --> qmodel
     docsapi --> svc
     svc --> pg
     svc --> files
@@ -53,12 +62,11 @@ flowchart LR
     files --> pipe
     cache --> model
 
-    retrieval -.-> pg
-    answer -.-> retrieval
-    evaluation -.-> retrieval
+    evalh --> search
+    answer -.-> search
 
     classDef planned stroke-dasharray: 5 5,fill:#f8fafc,color:#475569;
-    class retrieval,answer,evaluation planned;
+    class answer planned;
 ```
 
 ## Components
@@ -80,7 +88,10 @@ flowchart LR
 | `app/storage.py` | `DocumentStorage` interface and `LocalFileStorage` ([ADR 0004](decisions/0004-document-storage.md)) |
 | `app/ingestion/` | Validation, extraction (PDF via pypdfium2), language detection, chunking, the job queue and state machine, and the extract → chunk → embed pipeline |
 | `app/embeddings/` | `EmbeddingProvider` interface, BGE-M3 provider, test-only fake provider ([ADR 0003](decisions/0003-local-bge-m3.md)) |
-| `app/worker/` | Worker process: `run`, `prepare-model` and `healthcheck` commands |
+| `app/search/` | Keyword analyzer (Sudachi + Snowball), keyword index rebuild, semantic/BM25 candidate queries, Reciprocal Rank Fusion, snippets, and `SearchService` ([retrieval.md](retrieval.md)) |
+| `app/api/v1/search.py` | `POST /search` and `GET /search/options` |
+| `app/worker/` | Worker process: `run`, `prepare-model`, `healthcheck` and `rebuild-search-index` commands |
+| `evaluation/` | Judged bilingual evaluation set, metrics, the evaluation harness and benchmarks ([evaluation/](evaluation/README.md)) |
 | `alembic/` | Migration environment; reads `DATABASE_URL` through the same `Settings` class |
 
 **Liveness vs readiness.** `/api/v1/health` never touches the database: it answers "is the
@@ -108,15 +119,17 @@ different origin.
 a PEP 735 `dev` dependency group) and resolved into the committed `uv.lock`. CI and the
 Docker images install with `uv sync --locked`, so they use exactly the locked versions. The
 model libraries (sentence-transformers, PyTorch) are an optional extra, `embeddings`,
-installed only for the worker. On Linux, PyTorch is locked to the CPU-only wheel from
+installed in the API and worker images but not in CI. On Linux, PyTorch is locked to the CPU-only wheel from
 PyTorch's own index (an explicit uv index), which keeps the worker image at about 1.3 GB;
 macOS installs the PyPI wheel, which supports Apple's MPS backend. PDF text is extracted
 with pypdfium2 (PDFium, BSD-3-Clause / Apache-2.0).
 
 **API and worker are separate processes.** The API validates and stores uploads and writes
-a job row; it never imports PyTorch. The worker polls PostgreSQL for jobs, so the API does
-not need to know whether a worker is running, and documents simply stay `pending` until one
-is. Both share the database and the file storage, nothing else.
+a job row. The worker polls PostgreSQL for jobs, so the API does not need to know whether a
+worker is running, and documents simply stay `pending` until one is. Both share the
+database, the file storage and the model cache. Since Phase 3 the API also loads BGE-M3, to
+embed search queries; it runs inference on one dedicated thread so the event loop is never
+blocked, and keyword search keeps working if the model cannot be loaded.
 
 **Uploads.** Endpoints under `/api/v1/documents`:
 
@@ -144,9 +157,12 @@ PostgreSQL 17 with pgvector 0.8.1 (`pgvector/pgvector:0.8.1-pg17`). See
 | --- | --- |
 | `0001_enable_pgvector` | The `vector` extension |
 | `0002_documents` | `documents`, `chunks` (with `embedding vector(1024)`) and `ingestion_jobs`, with CHECK constraints for every status invariant |
+| `0003_keyword_search` | `chunks.search_vector` (`tsvector`, GIN index) and `chunks.search_length`, backfilled for existing chunks |
 
 Columns and constraints are listed in [ingestion-pipeline.md](ingestion-pipeline.md#schema).
-There is no vector index yet; it will be chosen with retrieval.
+There is deliberately no vector index: semantic search is exact, and
+[ADR 0006](decisions/0006-hybrid-retrieval.md) records the measurements and the size at
+which an HNSW index should be added.
 
 ### Frontend (`frontend/`)
 
@@ -161,7 +177,8 @@ React 19 + TypeScript + Vite + Tailwind CSS v4, with React Router for navigation
 | `src/hooks/usePolledResource.ts` | Loads a resource and polls it while `shouldPoll` is true, backing off from 2 s to 10 s |
 | `src/components/documents/*` | Upload panel (drag and drop), document table and cards, status badge, pagination, confirmation dialog |
 | `src/pages/DocumentsPage.tsx` | Upload and library with a status filter; polls while documents are pending or processing |
-| `src/pages/DocumentDetailPage.tsx` | Metadata, latest job, errors, chunk previews, download, retry, reindex and delete |
+| `src/pages/DocumentDetailPage.tsx` | Metadata, latest job, errors, chunk previews (opens at `?chunk=N` from a search result), download, retry, reindex and delete |
+| `src/pages/SearchPage.tsx`, `src/components/search/*` | Search with mode and filters kept in the URL, result cards with highlights, scores and method ranks |
 | `src/pages/*` | Dashboard (live system status), and placeholders for Chat and Evaluation |
 
 The Chat and Evaluation pages are explicit placeholders labelled "Coming in a later
@@ -189,7 +206,9 @@ flowchart LR
 - `db` is healthy when `pg_isready` succeeds; data is kept in the `postgres-data` volume.
 - `migrate` uses the API image to apply migrations before the API and worker start.
 - `backend` (Dockerfile target `api`) is healthy when `/api/v1/health` responds; its source
-  is mounted read-only for auto-reload, and uploads go to the `uploads` volume.
+  is mounted read-only for auto-reload, and uploads go to the `uploads` volume. It mounts
+  the `model-cache` volume and preloads BGE-M3 in the background for semantic search
+  (memory limit 4 GB by default).
 - `worker` (Dockerfile target `worker`) has the embeddings extra installed, mounts
   `uploads` and the `model-cache` volume, and is healthy while its heartbeat file is fresh.
   It is limited to 4 CPUs and 6 GB by default and gets 45 seconds to shut down gracefully.
@@ -218,14 +237,13 @@ The intended request path for later phases, recorded here so that current choice
 checked against it:
 
 1. **Ingestion** (Phase 2, implemented): upload → validation → extraction → language
-   detection → chunking → BGE-M3 embeddings → `documents` / `chunks`.
-2. **Retrieval**: vector similarity over `chunks.embedding` (with an ANN index chosen by
-   measurement) plus keyword search, merged (for example with reciprocal rank fusion), then
-   reranked. Japanese keyword search needs its own tokenization decision (ADR 0002).
-3. **Generation**: answer composed only from retrieved passages, returned with citations
-   (chunks already carry page numbers and sections for that).
-4. **Evaluation**: a fixed bilingual question set with retrieval metrics and answer checks,
-   so changes to chunking, retrieval or prompts can be compared.
+   detection → chunking → BGE-M3 embeddings and keyword terms → `documents` / `chunks`.
+2. **Retrieval** (Phase 3, implemented): semantic, keyword and hybrid search over chunks,
+   with an evaluation set that measures them ([retrieval.md](retrieval.md)). No reranker:
+   ADR 0006 explains what evidence would justify one.
+3. **Generation** (planned): an answer composed only from retrieved passages, returned with
+   citations (results already carry document, page and section).
+4. **Answer evaluation** (planned): extend the evaluation set with answer checks, so
+   changes to retrieval or prompts can be compared end to end.
 
-Reranker and answer-generation models are deliberately not chosen yet; each will get an
-ADR when it is.
+Answer-generation models are deliberately not chosen yet; each will get an ADR when it is.
