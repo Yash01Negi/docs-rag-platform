@@ -74,3 +74,14 @@ markers = [
     "model: downloads and runs the real BGE-M3 model (opt-in with RUN_MODEL_TESTS=1)",
 ]
 filterwarnings = ["error::DeprecationWarning:app.*"]
+
+# Linux (including the Docker worker) installs CPU-only PyTorch: the default PyPI wheels pull
+# in ~4 GB of CUDA libraries the worker never uses. macOS keeps the PyPI wheel, which
+# supports Apple's Metal (MPS) backend for native runs.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
