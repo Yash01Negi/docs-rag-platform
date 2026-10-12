@@ -6,6 +6,7 @@ from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from app.db.models import Base
 
@@ -123,3 +124,65 @@ def test_keyword_search_migration_backfills_existing_chunks(
     assert row.search_length == 4
 
     command.downgrade(alembic_config, "0002")
+
+
+def test_conversation_tables_upgrade_and_downgrade_keep_documents(
+    alembic_config: Config, empty_database_url: str
+) -> None:
+    command.upgrade(alembic_config, "0003")
+    engine = create_engine(empty_database_url)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO documents (id, filename, file_type, mime_type, size_bytes, "
+                    "sha256, storage_key, status) VALUES (gen_random_uuid(), 'a.txt', 'text', "
+                    "'text/plain', 10, repeat('b', 64), 'key2', 'pending')"
+                )
+            )
+        command.upgrade(alembic_config, "head")
+        assert {"conversations", "messages", "message_citations"} <= _tables(empty_database_url)
+        with engine.begin() as connection:
+            conversation = connection.scalar(
+                text(
+                    "INSERT INTO conversations (id, title) "
+                    "VALUES (gen_random_uuid(), 't') RETURNING id"
+                )
+            )
+            question = connection.scalar(
+                text(
+                    "INSERT INTO messages (id, conversation_id, sequence, role, content, status) "
+                    "VALUES (gen_random_uuid(), :c, 1, 'user', 'q', 'complete') RETURNING id"
+                ),
+                {"c": conversation},
+            )
+            # A second streaming answer in the same conversation violates the partial index.
+            connection.execute(
+                text(
+                    "INSERT INTO messages (id, conversation_id, sequence, role, status, "
+                    "reply_to_id) VALUES (gen_random_uuid(), :c, 2, 'assistant', 'streaming', :q)"
+                ),
+                {"c": conversation, "q": question},
+            )
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO messages (id, conversation_id, sequence, role, content, status) "
+                    "VALUES (gen_random_uuid(), :c, 3, 'user', 'q2', 'complete')"
+                ),
+                {"c": conversation},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO messages (id, conversation_id, sequence, role, status, "
+                    "reply_to_id) SELECT gen_random_uuid(), :c, 4, 'assistant', 'streaming', id "
+                    "FROM messages WHERE sequence = 3"
+                ),
+                {"c": conversation},
+            )
+        command.downgrade(alembic_config, "0003")
+        assert not {"conversations", "messages", "message_citations"} & _tables(empty_database_url)
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM documents")) == 1
+    finally:
+        engine.dispose()

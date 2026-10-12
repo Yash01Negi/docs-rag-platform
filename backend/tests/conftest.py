@@ -21,6 +21,15 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
+def unused_tcp_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.fixture
 def make_settings(tmp_path: Path) -> Callable[..., Settings]:
     """Build Settings without reading the developer's .env file or environment."""
 
@@ -73,8 +82,15 @@ def empty_database_url(database_url: str) -> Iterator[str]:
         admin.dispose()
 
 
-# Tables created by migration 0002, cleared before each test that uses ``clean_database``.
-_PHASE2_TABLES = ("ingestion_jobs", "chunks", "documents")
+# Tables cleared before each test that uses ``clean_database`` (migrations 0002 and 0004).
+_DATA_TABLES = (
+    "message_citations",
+    "messages",
+    "conversations",
+    "ingestion_jobs",
+    "chunks",
+    "documents",
+)
 
 
 @pytest.fixture
@@ -82,7 +98,7 @@ def clean_database(database_url: str) -> Iterator[str]:
     """The migrated test database with all document data removed before the test."""
     engine = create_engine(database_url)
     with engine.begin() as connection:
-        connection.execute(text(f"TRUNCATE {', '.join(_PHASE2_TABLES)} CASCADE"))
+        connection.execute(text(f"TRUNCATE {', '.join(_DATA_TABLES)} CASCADE"))
     engine.dispose()
     yield database_url
 
