@@ -1,0 +1,47 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# Data, models and database files (never commit these)
+data/
+datasets/
+*.sqlite
+*.db
+*.parquet
+*.safetensors
+*.bin
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.gguf
+pgdata/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
