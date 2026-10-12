@@ -11,10 +11,12 @@ const IMPLEMENTED = [
   'Environment-based configuration and structured JSON logging',
   'Application shell with live backend status',
   'Docker Compose development environment and CI checks',
+  'Document upload for PDF, Markdown and text (Phase 2)',
+  'Japanese/English chunking and local BGE-M3 embeddings in pgvector (Phase 2)',
+  'Background ingestion worker with retries and reindexing (Phase 2)',
 ]
 
 const PLANNED = [
-  'Document ingestion for Japanese and English sources',
   'Hybrid retrieval (vector + keyword) with reranking',
   'Grounded answers with citations',
   'Retrieval and answer-quality evaluation',
@@ -41,8 +43,8 @@ export default function DashboardPage() {
         <h2 className="text-2xl font-semibold tracking-tight text-slate-900">Welcome to YashRAG</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
           A bilingual (Japanese/English) document intelligence platform built on retrieval-augmented
-          generation. This is the Phase 1 foundation: the platform services are running, and the
-          document, chat and evaluation features will arrive in later milestones.
+          generation. Phases 1 and 2 are in place: the platform services run, and documents can be
+          uploaded, chunked and embedded. Retrieval, chat and evaluation arrive in later milestones.
         </p>
       </section>
 
@@ -95,7 +97,7 @@ export default function DashboardPage() {
           <div className="grid gap-6 px-5 py-4 sm:grid-cols-2">
             <div>
               <h4 className="text-xs font-semibold tracking-wide text-emerald-700 uppercase">
-                Implemented (Phase 1)
+                Implemented
               </h4>
               <ul className="mt-3 space-y-2.5 text-sm text-slate-700">
                 {IMPLEMENTED.map((item) => (
@@ -128,7 +130,7 @@ export default function DashboardPage() {
           Modules
         </h3>
         <div className="mt-3 grid gap-4 sm:grid-cols-3">
-          {NAV_ITEMS.filter((item) => !item.available).map(({ to, label, icon: ItemIcon }) => (
+          {NAV_ITEMS.filter((item) => item.to !== '/').map(({ to, label, icon: ItemIcon, available }) => (
             <Link
               key={to}
               to={to}
@@ -140,7 +142,11 @@ export default function DashboardPage() {
                 </span>
                 <span className="font-medium text-slate-900">{label}</span>
               </div>
-              <p className="mt-3 text-xs font-medium text-amber-700">Coming in a later milestone</p>
+              {available ? (
+                <p className="mt-3 text-xs font-medium text-emerald-700">Available</p>
+              ) : (
+                <p className="mt-3 text-xs font-medium text-amber-700">Coming in a later milestone</p>
+              )}
             </Link>
           ))}
         </div>

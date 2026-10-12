@@ -11,12 +11,14 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: DashboardIcon, available: true },
-  { to: '/documents', label: 'Documents', icon: DocumentsIcon, available: false },
+  { to: '/documents', label: 'Documents', icon: DocumentsIcon, available: true },
   { to: '/chat', label: 'Chat', icon: ChatIcon, available: false },
   { to: '/evaluation', label: 'Evaluation', icon: EvaluationIcon, available: false },
 ]
 
 export function pageTitle(pathname: string): string {
   const match = NAV_ITEMS.find((item) => item.to === pathname)
-  return match?.label ?? 'Not found'
+  if (match) return match.label
+  if (/^\/documents\/[^/]+\/?$/.test(pathname)) return 'Document details'
+  return 'Not found'
 }
