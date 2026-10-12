@@ -111,6 +111,7 @@ jobs:
 
       - name: Benchmark
         run: |
+          set -o pipefail
           psql "postgresql://yashrag:ci-only-password@localhost:5432/yashrag_bench" \
             -c "CREATE EXTENSION IF NOT EXISTS vector"
           echo "CPU: $(nproc) x $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
