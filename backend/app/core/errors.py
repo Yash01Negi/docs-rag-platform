@@ -20,6 +20,20 @@ from app.core.logging import request_id_var
 logger = logging.getLogger(__name__)
 
 
+class ApiError(StarletteHTTPException):
+    """An HTTP error with an explicit machine-readable ``code`` for the error envelope."""
+
+    def __init__(
+        self,
+        status_code: int,
+        code: str,
+        message: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=message, headers=headers)
+        self.code = code
+
+
 def _status_code_name(status_code: int) -> str:
     try:
         return HTTPStatus(status_code).phrase.lower().replace(" ", "_").replace("-", "_")
@@ -46,9 +60,8 @@ def error_response(
 
 async def _http_exception_handler(_: Request, exc: StarletteHTTPException) -> JSONResponse:
     message = exc.detail if isinstance(exc.detail, str) else HTTPStatus(exc.status_code).phrase
-    return error_response(
-        exc.status_code, _status_code_name(exc.status_code), message, headers=exc.headers
-    )
+    code = exc.code if isinstance(exc, ApiError) else _status_code_name(exc.status_code)
+    return error_response(exc.status_code, code, message, headers=exc.headers)
 
 
 async def _validation_exception_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
