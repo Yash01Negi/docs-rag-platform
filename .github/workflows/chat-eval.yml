@@ -1,0 +1,100 @@
+# TEMPORARY verification job for Phase 4 (conversational RAG).
+# The development environment cannot reach huggingface.co, so the answer evaluation with
+# real BGE-M3 retrieval runs here. If the repository has an ANTHROPIC_API_KEY secret, the
+# configured model is evaluated too; otherwise that step says so and is skipped.
+# Removed once the results are recorded in docs/evaluation/.
+name: Answer evaluation (temporary)
+
+on:
+  push:
+    branches: [feature/phase-4-conversational-rag]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-eval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chat-eval:
+    name: Answer evaluation with real retrieval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg17
+        env:
+          POSTGRES_USER: yashrag
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: yashrag_eval
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yashrag -d yashrag_eval"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Throwaway credentials for the ephemeral CI database container only.
+      DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_eval
+      MODEL_CACHE_DIR: /home/runner/models
+      EMBEDDING_DEVICE: cpu
+      HAS_ANTHROPIC_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+
+      - name: Install with the embeddings extra (CPU-only PyTorch on Linux)
+        run: uv sync --locked --extra embeddings
+
+      - name: Download BAAI/bge-m3
+        run: uv run --extra embeddings python -m app.worker prepare-model
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Extractive baseline (no language model), semantic retrieval
+        run: |
+          uv run --extra embeddings python -m evaluation.chat_eval --reset \
+            --provider extractive --mode semantic --output-dir evaluation/results/baseline
+          echo "CPU: $(nproc) x $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+          cat evaluation/results/baseline/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Is a model API key available?
+        run: |
+          if [ "$HAS_ANTHROPIC_KEY" = "true" ]; then
+            echo "ANTHROPIC_API_KEY secret: present"
+          else
+            echo "ANTHROPIC_API_KEY secret: NOT SET; the real-model evaluation is skipped"
+          fi
+
+      - name: Configured model, semantic retrieval
+        if: env.HAS_ANTHROPIC_KEY == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv run --extra embeddings python -m evaluation.chat_eval --reset \
+            --provider configured --mode semantic --output-dir evaluation/results/model
+          cat evaluation/results/model/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Print results.json files (gzip + base64)
+        if: always()
+        run: |
+          for name in baseline model; do
+            file="evaluation/results/$name/results.json"
+            [ -f "$file" ] || continue
+            sha256sum "$file"
+            echo "RESULTS-$name-BEGIN"
+            gzip -9 -n -c "$file" | base64 -w 0
+            echo
+            echo "RESULTS-$name-END"
+          done
