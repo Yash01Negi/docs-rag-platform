@@ -14,12 +14,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ApiError
-from app.db.models import Chunk, Document, DocumentStatus, IngestionJob, JobKind
+from app.db.models import (
+    Chunk,
+    Document,
+    DocumentStatus,
+    IngestionJob,
+    JobKind,
+    MessageCitation,
+)
 from app.ingestion import jobs
 from app.ingestion.errors import ErrorCode, IngestionError
 from app.ingestion.validation import file_type_from_extension, sanitize_filename, validate_file
@@ -270,6 +277,12 @@ async def delete_document(
         if document is None:
             raise ApiError(404, "document_not_found", "Document not found.")
         storage_key = document.storage_key
+        # Answers keep their citation metadata (file name, pages) but not the deleted text.
+        await session.execute(
+            update(MessageCitation)
+            .where(MessageCitation.document_id == document_id)
+            .values(excerpt=None)
+        )
         await session.delete(document)
         await session.commit()
     try:
