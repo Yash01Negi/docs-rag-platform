@@ -1,0 +1,259 @@
+# YashRAG answer (chat) evaluation set.
+#
+# Questions about the retrieval evaluation corpus (documents/), each judged by a person:
+#
+#   evidence      passages that answer the question, as {doc, anchor}: a short exact quote
+#                 from the document (chunk boundaries change, so judgments never name chunks).
+#                 A source given to the model counts as evidence when it contains an anchor.
+#   facts         what a correct answer must state. Each fact is a list of accepted
+#                 spellings; the fact is present when any spelling appears in the answer
+#                 after NFKC, case folding, and removing spaces and digit-group commas
+#                 ("3,000 円" matches "3000円"). This is a lexical check, not a judgment of
+#                 meaning: an answer can contain the words and still be wrong, and the
+#                 report says so.
+#   abstain       true when the corpus does not answer the question. The ideal answer says
+#                 the documents do not contain it (grounding insufficient_evidence or
+#                 no_sources).
+#   follow_up_of  asked in the same conversation, right after the named question.
+#   answer_language  the language the answer must be written in: the question's language.
+#
+# Types: en_en, ja_ja (question and evidence in the same language), en_to_ja (English
+# question, Japanese evidence), ja_to_en, mixed (the question mixes both), multi_source
+# (evidence in two documents), follow_up, distractor (another document shares the
+# question's words but does not answer it), no_answer.
+
+version = 1
+
+# ------------------------------------------------------------------- English -> English
+
+[[questions]]
+id = "en-en-01"
+question = "How long are daily database snapshots retained?"
+answer_language = "en"
+types = ["en_en", "distractor"]
+notes = "The SnapKeep release notes mention backups but not retention."
+evidence = [{ doc = "en-backup-policy.md", anchor = "Daily snapshots are retained for 35 days" }]
+facts = [["35 days", "35-day", "thirty-five days"]]
+
+[[questions]]
+id = "en-en-02"
+question = "What is the recovery time objective for database restores?"
+answer_language = "en"
+types = ["en_en"]
+evidence = [{ doc = "en-backup-policy.md", anchor = "The target recovery time objective is four hours" }]
+facts = [["four hours", "4 hours", "4-hour", "four-hour"]]
+
+[[questions]]
+id = "en-en-03"
+question = "What happens if nobody acknowledges a SEV1 page?"
+answer_language = "en"
+types = ["en_en"]
+evidence = [{ doc = "en-incident-runbook.md", anchor = "If the page is not acknowledged within ten minutes" }]
+facts = [["ten minutes", "10 minutes"], ["secondary on-call", "secondary"]]
+
+[[questions]]
+id = "en-en-04"
+question = "What is the meal per diem for domestic business trips?"
+answer_language = "en"
+types = ["en_en"]
+evidence = [{ doc = "en-travel-expenses.txt", anchor = "daily per diem of 60 US dollars" }]
+facts = [["60"]]
+
+[[questions]]
+id = "en-en-05"
+question = "And for international ones?"
+follow_up_of = "en-en-04"
+answer_language = "en"
+types = ["en_en", "follow_up"]
+notes = "Only answerable with the previous question as context."
+evidence = [{ doc = "en-travel-expenses.txt", anchor = "80 US dollars for international trips" }]
+facts = [["80"]]
+
+[[questions]]
+id = "en-en-06"
+question = "How soon must operating system updates be installed on company laptops?"
+answer_language = "en"
+types = ["en_en"]
+evidence = [{ doc = "en-laptop-security.md", anchor = "Operating system updates must be installed within 14 days" }]
+facts = [["14 days", "fourteen days"]]
+
+# --------------------------------------------------------------------- Japanese -> Japanese
+
+[[questions]]
+id = "ja-ja-01"
+question = "在宅勤務は週に何日までできますか？"
+answer_language = "ja"
+types = ["ja_ja"]
+evidence = [{ doc = "ja-remote-work.md", anchor = "在宅勤務は原則として週3日までとする" }]
+facts = [["週3日", "3日", "三日"]]
+
+[[questions]]
+id = "ja-ja-02"
+question = "在宅勤務の通信費手当は月にいくらですか？"
+answer_language = "ja"
+types = ["ja_ja"]
+evidence = [{ doc = "ja-remote-work.md", anchor = "通信費手当として月額3,000円を支給する" }]
+facts = [["3000円", "3千円", "三千円"]]
+
+[[questions]]
+id = "ja-ja-03"
+question = "システム障害の第一報は何分以内に共有する必要がありますか？"
+answer_language = "ja"
+types = ["ja_ja"]
+evidence = [{ doc = "ja-incident-handling.md", anchor = "15分以内に障害対応チャンネルで第一報を共有する" }]
+facts = [["15分", "十五分"]]
+
+[[questions]]
+id = "ja-ja-04"
+question = "経費精算の申請期限はいつですか？"
+answer_language = "ja"
+types = ["ja_ja", "distractor"]
+notes = "The English travel policy has a different deadline (30 days after the trip)."
+evidence = [{ doc = "ja-expense-reimbursement.txt", anchor = "支出した月の翌月10日までに経費精算システムで申請すること" }]
+facts = [["翌月10日", "翌月の10日"]]
+
+[[questions]]
+id = "ja-ja-05"
+question = "情報セキュリティ基準では、パスワードは何文字以上にする必要がありますか？"
+answer_language = "ja"
+types = ["ja_ja", "distractor"]
+notes = "The English laptop policy requires 16 characters; this question names the Japanese standard."
+evidence = [{ doc = "ja-information-security.md", anchor = "パスワードは12文字以上とし" }]
+facts = [["12文字", "十二文字"]]
+
+# --------------------------------------------------------------------- English -> Japanese
+
+[[questions]]
+id = "en-ja-01"
+question = "How many days a week can employees work from home under the remote work rules?"
+answer_language = "en"
+types = ["en_to_ja", "distractor"]
+notes = "The English office guide mentions working from home but defers to the manager."
+evidence = [{ doc = "ja-remote-work.md", anchor = "在宅勤務は原則として週3日までとする" }]
+facts = [["3 days", "three days"]]
+
+[[questions]]
+id = "en-ja-02"
+question = "How much drinking water and emergency food does the office stockpile per employee?"
+answer_language = "en"
+types = ["en_to_ja"]
+evidence = [{ doc = "ja-disaster-preparedness.md", anchor = "社員一人あたり三日分の飲料水と非常食を備蓄している" }]
+facts = [["three days", "3 days", "three-day", "3-day"]]
+
+[[questions]]
+id = "en-ja-03"
+question = "What allowance is paid per night for business trips with an overnight stay?"
+answer_language = "en"
+types = ["en_to_ja"]
+evidence = [{ doc = "ja-expense-reimbursement.txt", anchor = "一泊につき2,000円の出張手当を支給する" }]
+facts = [["2000"]]
+
+# --------------------------------------------------------------------- Japanese -> English
+
+[[questions]]
+id = "ja-en-01"
+question = "SEV1インシデントのポストモーテムはいつまでに書く必要がありますか？"
+answer_language = "ja"
+types = ["ja_to_en"]
+evidence = [{ doc = "en-incident-runbook.md", anchor = "A blameless postmortem is written for every SEV1 and SEV2 incident within five business days" }]
+facts = [["5営業日", "五営業日", "5 business days", "five business days"]]
+
+[[questions]]
+id = "ja-en-02"
+question = "本番データベースの日次スナップショットは何日間保持されますか？"
+answer_language = "ja"
+types = ["ja_to_en"]
+evidence = [{ doc = "en-backup-policy.md", anchor = "Daily snapshots are retained for 35 days" }]
+facts = [["35日", "35 days"]]
+
+[[questions]]
+id = "ja-en-03"
+question = "出張の食事日当は海外出張の場合いくらですか？"
+answer_language = "ja"
+types = ["ja_to_en"]
+evidence = [{ doc = "en-travel-expenses.txt", anchor = "80 US dollars for international trips" }]
+facts = [["80"]]
+
+# --------------------------------------------------------------------------------- mixed
+
+[[questions]]
+id = "mixed-01"
+question = "API key ごとの rate limit は1分あたり何リクエストですか？"
+answer_language = "ja"
+types = ["mixed"]
+evidence = [{ doc = "mixed-api-guide.md", anchor = "各 API key には毎分600リクエストの rate limit がある" }]
+facts = [["600"]]
+
+[[questions]]
+id = "mixed-02"
+question = "canary release では最初に何%の traffic を新しい version に流しますか？"
+answer_language = "ja"
+types = ["mixed"]
+evidence = [{ doc = "mixed-deployment-guide.md", anchor = "最初の30分間はトラフィックの10%だけを新しいバージョンに流す" }]
+facts = [["10%", "10パーセント", "1割"]]
+
+[[questions]]
+id = "mixed-03"
+question = "What is the expiry time of an access token for the API?"
+answer_language = "en"
+types = ["mixed", "en_to_ja"]
+notes = "The evidence is a Japanese sentence with English terms."
+evidence = [{ doc = "mixed-api-guide.md", anchor = "access token の有効期限は1時間で" }]
+facts = [["1 hour", "one hour", "60 minutes"]]
+
+# -------------------------------------------------------------------------- multi-source
+
+[[questions]]
+id = "multi-01"
+question = "What minimum password lengths do the company security policies require?"
+answer_language = "en"
+types = ["multi_source", "en_en", "en_to_ja"]
+evidence = [
+  { doc = "en-laptop-security.md", anchor = "a unique password of at least 16 characters" },
+  { doc = "ja-information-security.md", anchor = "パスワードは12文字以上とし" },
+]
+facts = [["16"], ["12"]]
+
+[[questions]]
+id = "multi-02"
+question = "紛失した業務用ノートPCはどう対応しますか？"
+answer_language = "ja"
+types = ["multi_source", "ja_ja", "ja_to_en"]
+evidence = [
+  { doc = "ja-information-security.md", anchor = "直ちに情報システム部へ報告すること" },
+  { doc = "en-laptop-security.md", anchor = "Report a lost or stolen laptop to the security team within 24 hours" },
+]
+facts = [["報告"], ["消去", "wipe", "ワイプ"]]
+
+# ----------------------------------------------------------------------------- no answer
+
+[[questions]]
+id = "none-01"
+question = "How many weeks of parental leave do employees get?"
+answer_language = "en"
+types = ["no_answer"]
+abstain = true
+
+[[questions]]
+id = "none-02"
+question = "社員食堂は何時から何時まで営業していますか？"
+answer_language = "ja"
+types = ["no_answer", "distractor"]
+notes = "The office guide gives the office's opening hours, not a cafeteria's."
+abstain = true
+
+[[questions]]
+id = "none-03"
+question = "Which cloud provider hosts the production PostgreSQL clusters?"
+answer_language = "en"
+types = ["no_answer", "distractor"]
+notes = "The backup policy describes the clusters but never names a provider."
+abstain = true
+
+[[questions]]
+id = "none-04"
+question = "APIのrate limitを超えた場合、アカウントは何日間停止されますか？"
+answer_language = "ja"
+types = ["no_answer", "distractor", "mixed"]
+notes = "The API guide says a 429 is returned and the client retries; nothing is suspended."
+abstain = true
