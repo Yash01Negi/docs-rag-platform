@@ -4,9 +4,8 @@ FastAPI service for YashRAG. See the [repository README](../README.md) for setup
 [architecture notes](../docs/architecture.md) for how the pieces fit together.
 
 ```bash
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync                         # install locked dependencies (uv.lock) into .venv
 cp ../.env.example ../.env      # then edit DATABASE_URL if needed
-alembic upgrade head
-uvicorn app.main:create_app --factory --reload
+uv run alembic upgrade head
+uv run uvicorn app.main:create_app --factory --reload
 ```

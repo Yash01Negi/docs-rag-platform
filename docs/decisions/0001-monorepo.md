@@ -24,8 +24,8 @@ Keep everything in one repository with a top-level directory per concern:
 | `infra/` | Deployment configuration (empty until a deployment phase) |
 | `.github/workflows/` | CI for all of the above |
 
-Each application keeps its own native tooling (pip/`pyproject.toml` for Python, npm for the
-frontend). There is no monorepo build tool such as Nx, Turborepo or Bazel.
+Each application keeps its own native tooling (uv with `pyproject.toml` and `uv.lock` for
+Python, npm with `package-lock.json` for the frontend). There is no monorepo build tool such as Nx, Turborepo or Bazel.
 
 ## Consequences
 

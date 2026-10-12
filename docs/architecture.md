@@ -88,6 +88,10 @@ different origin.
 **One database driver.** psycopg 3 supports both sync and async use, so the application
 (async SQLAlchemy) and Alembic (sync) share the same `postgresql+psycopg://` URL.
 
+**Dependencies.** Runtime and dev dependencies are declared in `pyproject.toml` (dev tools in
+a PEP 735 `dev` dependency group) and resolved into the committed `uv.lock`. CI and the
+Docker image install with `uv sync --locked`, so they use exactly the locked versions.
+
 ### Database
 
 PostgreSQL 17 with pgvector 0.8.1 (`pgvector/pgvector:0.8.1-pg17`). Phase 1 creates only
@@ -135,9 +139,10 @@ flowchart LR
 
 Three parallel jobs on every push to `main` and every pull request:
 
-1. **Backend**: Ruff lint, Ruff format check, `alembic upgrade head` against a pgvector
-   service container, then the full pytest suite (unit and integration tests).
-2. **Frontend**: `npm ci`, `tsc -b`, `vite build`.
+1. **Backend**: `uv sync --locked` (fails if `uv.lock` is out of date), Ruff lint, Ruff
+   format check, `alembic upgrade head` against a pgvector service container, then the full
+   pytest suite (unit and integration tests).
+2. **Frontend**: `npm ci`, oxlint (warnings fail the job), `tsc -b`, `vite build`.
 3. **Compose**: `docker compose config` validation.
 
 There is no deployment step.
