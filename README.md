@@ -116,7 +116,7 @@ the API, the ingestion worker and the frontend once their dependencies are healt
 
 The worker downloads BAAI/bge-m3 (about 2.3 GB) into the `model-cache` volume the first time
 it processes a document. To download it ahead of time, and to see the exact model revision
-it resolved (useful for pinning `EMBEDDING_MODEL_REVISION`):
+it resolved (the default `EMBEDDING_MODEL_REVISION` pins commit `5617a9f6…`):
 
 ```bash
 docker compose run --rm worker python -m app.worker prepare-model
@@ -125,8 +125,9 @@ docker compose run --rm worker python -m app.worker prepare-model
 The worker image is about 1.3 GB (measured on a GitHub Actions runner): on Linux, uv
 installs CPU-only PyTorch from the PyTorch CPU wheel index, without the CUDA libraries the
 default PyPI wheel pulls in. On macOS the PyPI wheel is used so that host-native runs can use
-Apple's Metal (MPS) backend. The model weights are never part of the image. The worker container is limited to 4 CPUs and 6 GB of
-memory by default (`WORKER_CPUS`, `WORKER_MEMORY`); BGE-M3 on CPU needs roughly 4 to 6 GB.
+Apple's Metal (MPS) backend. The model weights are never part of the image. The worker
+container is limited to 4 CPUs and 6 GB of memory by default (`WORKER_CPUS`,
+`WORKER_MEMORY`); BGE-M3 on CPU needs roughly 4 to 6 GB.
 
 | Service | URL |
 | --- | --- |
@@ -214,7 +215,7 @@ All configuration is read from environment variables (or `.env`). See
 | `STORAGE_DIR` | no | Where original files are stored. Default `data/uploads`; `/data/uploads` (a named volume) in Docker. |
 | `EMBEDDING_PROVIDER` | no | `bge-m3` (default). `fake` is a deterministic test double and is refused unless `ENVIRONMENT=test`. |
 | `EMBEDDING_MODEL_NAME` | no | Hugging Face model ID. Default `BAAI/bge-m3`. |
-| `EMBEDDING_MODEL_REVISION` | no | Branch, tag or commit SHA. Default `main`; pin a SHA for reproducible indexes. |
+| `EMBEDDING_MODEL_REVISION` | no | Commit SHA, branch or tag. Default `5617a9f61b028005a4858fdac845db406aefb181`, the BAAI/bge-m3 commit verified for Phase 2. Changing it means reindexing for consistent vectors. |
 | `EMBEDDING_DIMENSION` | no | Must be `1024` (the `vector(1024)` column). |
 | `EMBEDDING_DEVICE` | no | `auto` (MPS if available, else CPU), `cpu`, `mps` or `cuda`. Default `auto`; Compose uses `cpu`. On Linux the locked PyTorch is CPU-only, so `cuda` needs a different PyTorch build. |
 | `EMBEDDING_BATCH_SIZE` | no | Chunks per model call. Default `16`; Compose uses `8`. |
@@ -244,8 +245,8 @@ uv run pytest                   # unit tests; integration tests are skipped with
 ```
 
 To also run the integration tests (readiness, migrations, the document API, the job queue
-and the worker against a real database), point `TEST_DATABASE_URL` at a PostgreSQL + pgvector server that has
-been migrated. The test user needs permission to create databases, because some tests create
+and the worker against a real database), point `TEST_DATABASE_URL` at a PostgreSQL +
+pgvector server that has been migrated. The test user needs permission to create databases, because some tests create
 and drop a temporary database.
 
 ```bash

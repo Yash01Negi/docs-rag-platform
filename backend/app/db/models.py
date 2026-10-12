@@ -114,7 +114,7 @@ class Document(Base):
         CheckConstraint("chunk_count >= 0", name="ck_documents_chunk_count"),
         CheckConstraint(
             "status <> 'completed' OR (chunk_count > 0 AND processed_at IS NOT NULL "
-            "AND embedding_model IS NOT NULL)",
+            "AND embedding_model IS NOT NULL AND embedding_model_revision IS NOT NULL)",
             name="ck_documents_completed_has_index",
         ),
         CheckConstraint(

@@ -55,7 +55,8 @@ def _prepare_model() -> int:
         print(f"error: {exc.message}", file=sys.stderr)
         return 1
     print(f"model:     {info.name}")
-    print(f"revision:  {info.revision}  (set EMBEDDING_MODEL_REVISION to this to pin it)")
+    print(f"revision:  {info.revision}")
+    print(f"requested: {settings.embedding_model_revision}  (EMBEDDING_MODEL_REVISION)")
     print(f"dimension: {info.dimension}")
     print(f"device:    {getattr(provider, 'device', 'n/a')}")
     print(f"check:     embedded {len(vectors)} texts, {len(vectors[0])} dimensions each")

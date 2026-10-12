@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.core.config import Settings
 from app.db.models import Chunk, Document, DocumentStatus, IngestionJob, JobKind, JobStatus
 from app.db.session import create_engine, create_session_factory
-from app.embeddings.fake import FakeEmbeddingProvider
+from app.embeddings.base import EmbeddingModelInfo
+from app.embeddings.fake import FAKE_MODEL_NAME, FAKE_MODEL_REVISION, FakeEmbeddingProvider
 from app.ingestion import jobs
 from app.ingestion.errors import ErrorCode, IngestionError
 from app.storage import LocalFileStorage, new_storage_key
@@ -146,7 +147,8 @@ async def test_successful_job_writes_chunks_and_completes(
     document, job_rows, chunk_ids = await state(sessions, document_id)
     assert document.status == "completed"
     assert document.chunk_count == len(chunk_ids) > 0
-    assert document.embedding_model == "fake-deterministic"
+    assert document.embedding_model == FAKE_MODEL_NAME
+    assert document.embedding_model_revision == FAKE_MODEL_REVISION
     assert document.error_code is None
     assert [j.status for j in job_rows] == ["completed"]
     assert job_rows[0].lease_token is None and job_rows[0].completed_at is not None
@@ -378,6 +380,30 @@ async def test_reindex_keeps_old_index_visible_until_the_new_one_commits(
     assert not set(after) & set(original_chunks)
 
 
+class NewRevisionProvider(FakeEmbeddingProvider):
+    def load(self) -> EmbeddingModelInfo:
+        return EmbeddingModelInfo(FAKE_MODEL_NAME, "v2", self.dimension)
+
+
+async def test_reindex_records_the_revision_that_produced_the_new_vectors(
+    db_settings: Settings, engine: AsyncEngine, sessions, storage, tmp_path: Path
+) -> None:
+    document_id = await create_document(sessions, storage, tmp_path, ENGLISH_TEXT * 6)
+    await drain(make_worker(db_settings, engine, storage))
+    document, _, _ = await state(sessions, document_id)
+    assert document.embedding_model_revision == FAKE_MODEL_REVISION
+
+    async with sessions() as session:
+        document = await session.get(Document, document_id, with_for_update=True)
+        await jobs.enqueue_job(session, document, JobKind.REINDEX, max_attempts=1, request_id=None)
+        await session.commit()
+    await drain(make_worker(db_settings, engine, storage, NewRevisionProvider(1024)))
+
+    document, _, _ = await state(sessions, document_id)
+    assert document.status == "completed"
+    assert document.embedding_model_revision == "v2"
+
+
 async def test_failed_reindex_preserves_previous_index(
     db_settings: Settings, engine: AsyncEngine, sessions, storage, tmp_path: Path
 ) -> None:
@@ -394,6 +420,7 @@ async def test_failed_reindex_preserves_previous_index(
     document, job_rows, chunk_ids = await state(sessions, document_id)
     assert document.status == "completed"  # still searchable with the previous index
     assert chunk_ids == original_chunks
+    assert document.embedding_model_revision == FAKE_MODEL_REVISION  # matches the kept vectors
     assert document.error_code == "invalid_embedding"
     assert "previous index is still in use" in document.error_message
     assert [j.status for j in job_rows] == ["completed", "failed"]
@@ -443,6 +470,21 @@ async def test_database_rejects_completed_document_without_chunks(
                 update(Document)
                 .where(Document.id == document_id)
                 .values(status="completed", processed_at=text("now()"), embedding_model="x")
+            )
+            await session.commit()
+
+
+async def test_database_rejects_completed_document_without_model_revision(
+    db_settings: Settings, engine: AsyncEngine, sessions, storage, tmp_path: Path
+) -> None:
+    document_id = await create_document(sessions, storage, tmp_path)
+    await drain(make_worker(db_settings, engine, storage))
+    async with sessions() as session:
+        with pytest.raises(IntegrityError, match="ck_documents_completed_has_index"):
+            await session.execute(
+                update(Document)
+                .where(Document.id == document_id)
+                .values(embedding_model_revision=None)
             )
             await session.commit()
 

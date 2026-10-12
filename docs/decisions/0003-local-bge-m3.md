@@ -48,10 +48,13 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
   truncated. The chunker counts tokens with the model's own tokenizer, and settings
   validation guarantees the largest possible chunk fits.
 - Weights are downloaded at runtime into a persistent cache (`MODEL_CACHE_DIR`, a named
-  volume in Compose), never during `docker build`. `EMBEDDING_MODEL_REVISION` accepts a
-  commit SHA; `python -m app.worker prepare-model` downloads the weights and prints the SHA
-  it resolved so it can be pinned. The resolved commit is stored on every indexed
-  document (`documents.embedding_model_revision`).
+  volume in Compose), never during `docker build`. `EMBEDDING_MODEL_REVISION` defaults to
+  commit `5617a9f61b028005a4858fdac845db406aefb181`, the revision verified for Phase 2;
+  when a full commit SHA is configured, a cached snapshot of any other commit is refused.
+  `python -m app.worker prepare-model` downloads the weights and prints the commit it
+  resolved. That commit is stored on every indexed document
+  (`documents.embedding_model_revision`, required for completed documents by a CHECK
+  constraint), so vectors from different revisions can be told apart.
 - Device selection: `EMBEDDING_DEVICE=auto` uses Apple's Metal (MPS) backend when PyTorch
   reports it, otherwise CPU. On Linux, PyTorch comes from PyTorch's CPU-only wheel index
   (an explicit uv index in `backend/pyproject.toml`), so `cuda` is not available with the
@@ -76,8 +79,8 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
 - No document text leaves the machine during ingestion, and no API key is needed.
 - One model covers Japanese, English and mixed documents, with a long input limit, so chunk
   size is a retrieval decision rather than a model constraint.
-- Indexes are reproducible when the revision is pinned, and every document records which
-  model and revision produced its vectors.
+- Indexes are reproducible because the revision is pinned by default, and every document
+  records which model and revision produced its vectors.
 
 **Costs and risks**
 

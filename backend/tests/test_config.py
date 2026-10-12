@@ -3,7 +3,7 @@ from collections.abc import Callable
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import Environment, Settings
+from app.core.config import BGE_M3_REVISION, Environment, Settings
 
 
 def test_settings_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,6 +69,8 @@ def test_phase2_defaults(make_settings: Callable[..., Settings]) -> None:
 
     assert settings.max_upload_bytes == 20 * 1024 * 1024
     assert settings.embedding_model_name == "BAAI/bge-m3"
+    assert settings.embedding_model_revision == BGE_M3_REVISION
+    assert BGE_M3_REVISION == "5617a9f61b028005a4858fdac845db406aefb181"
     assert settings.embedding_dimension == 1024
     assert (settings.chunk_target_tokens, settings.chunk_overlap_tokens) == (400, 60)
     assert settings.chunk_max_tokens == 440

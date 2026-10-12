@@ -94,7 +94,7 @@ The document mirrors the job:
 | --- | --- |
 | `pending` | Waiting for a worker (new, retry scheduled, or reindex requested) |
 | `processing` | A worker holds the job |
-| `completed` | Chunks and embeddings are stored. `chunk_count > 0`, `processed_at` and the model name are set (enforced by database CHECK constraints) |
+| `completed` | Chunks and embeddings are stored. `chunk_count > 0`, `processed_at`, the model name and the model revision are set (enforced by database CHECK constraints) |
 | `failed` | No usable index. `chunk_count = 0` and `error_code` is set (enforced by CHECK constraints) |
 
 ### Claiming, leases and recovery

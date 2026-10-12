@@ -13,7 +13,7 @@ from starlette.datastructures import Headers, UploadFile
 from app.core.config import Settings
 from app.db.session import create_engine as create_async_engine
 from app.db.session import create_session_factory
-from app.embeddings.fake import FAKE_MODEL_NAME
+from app.embeddings.fake import FAKE_MODEL_NAME, FAKE_MODEL_REVISION
 from app.services.documents import staging_directory, upload_document
 from app.storage import LocalFileStorage
 from tests.samples import ENGLISH_TEXT, JAPANESE_TEXT, make_pdf
@@ -95,6 +95,7 @@ def test_upload_queues_document_and_worker_indexes_it(
     assert detail["language"] == "en"
     assert detail["page_count"] == 2
     assert detail["embedding_model"] == FAKE_MODEL_NAME
+    assert detail["embedding_model_revision"] == FAKE_MODEL_REVISION
     assert detail["embedding_dimension"] == 1024
     assert detail["processed_at"] is not None
     assert detail["latest_job"]["status"] == "completed"

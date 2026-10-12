@@ -78,7 +78,7 @@ flowchart LR
 | `app/api/v1/documents.py`, `schemas.py` | Document management endpoints and their response models |
 | `app/services/documents.py` | Upload (spool, hash, validate, deduplicate, store, queue), listing, retry, reindex, delete |
 | `app/storage.py` | `DocumentStorage` interface and `LocalFileStorage` ([ADR 0004](decisions/0004-document-storage.md)) |
-| `app/ingestion/` | Validation, extraction, language detection, chunking, the job queue and state machine, and the extract → chunk → embed pipeline |
+| `app/ingestion/` | Validation, extraction (PDF via pypdfium2), language detection, chunking, the job queue and state machine, and the extract → chunk → embed pipeline |
 | `app/embeddings/` | `EmbeddingProvider` interface, BGE-M3 provider, test-only fake provider ([ADR 0003](decisions/0003-local-bge-m3.md)) |
 | `app/worker/` | Worker process: `run`, `prepare-model` and `healthcheck` commands |
 | `alembic/` | Migration environment; reads `DATABASE_URL` through the same `Settings` class |
@@ -108,7 +108,10 @@ different origin.
 a PEP 735 `dev` dependency group) and resolved into the committed `uv.lock`. CI and the
 Docker images install with `uv sync --locked`, so they use exactly the locked versions. The
 model libraries (sentence-transformers, PyTorch) are an optional extra, `embeddings`,
-installed only for the worker.
+installed only for the worker. On Linux, PyTorch is locked to the CPU-only wheel from
+PyTorch's own index (an explicit uv index), which keeps the worker image at about 1.3 GB;
+macOS installs the PyPI wheel, which supports Apple's MPS backend. PDF text is extracted
+with pypdfium2 (PDFium, BSD-3-Clause / Apache-2.0).
 
 **API and worker are separate processes.** The API validates and stores uploads and writes
 a job row; it never imports PyTorch. The worker polls PostgreSQL for jobs, so the API does

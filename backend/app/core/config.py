@@ -14,6 +14,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # Dense output size of BAAI/bge-m3, and the size of the chunks.embedding vector column.
 EMBEDDING_DIMENSION = 1024
+# The BAAI/bge-m3 commit on the Hugging Face Hub that Phase 2 was verified with.
+BGE_M3_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 
 
 class Environment(StrEnum):
@@ -57,9 +59,9 @@ class Settings(BaseSettings):
     # accepted when ENVIRONMENT=test.
     embedding_provider: Literal["bge-m3", "fake"] = "bge-m3"
     embedding_model_name: str = "BAAI/bge-m3"
-    # A branch, tag or commit SHA on the Hugging Face Hub. Pin a commit SHA for
-    # reproducibility; the resolved commit is recorded on every indexed document either way.
-    embedding_model_revision: str = "main"
+    # A commit SHA (or branch or tag) on the Hugging Face Hub. The default is the BAAI/bge-m3
+    # commit verified for Phase 2; the resolved commit is recorded on every indexed document.
+    embedding_model_revision: str = Field(default=BGE_M3_REVISION, min_length=1)
     embedding_dimension: int = EMBEDDING_DIMENSION
     embedding_device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     embedding_batch_size: int = Field(default=16, ge=1, le=256)

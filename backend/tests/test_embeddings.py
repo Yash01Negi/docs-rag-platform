@@ -1,12 +1,13 @@
 import math
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 import pytest
 
 from app.core.config import Settings
 from app.embeddings import create_embedding_provider
 from app.embeddings.base import EmbeddingModelInfo, EmbeddingProvider, validate_embeddings
-from app.embeddings.bge_m3 import BgeM3EmbeddingProvider
+from app.embeddings.bge_m3 import BgeM3EmbeddingProvider, resolved_revision
 from app.embeddings.fake import FAKE_MODEL_NAME, FakeEmbeddingProvider
 from app.ingestion.errors import ErrorCode, IngestionError
 
@@ -149,3 +150,23 @@ def test_bge_m3_reports_a_clear_error_when_the_model_is_unavailable(
         provider.embed(["hello"])
     assert exc.value.code is ErrorCode.EMBEDDING_MODEL_UNAVAILABLE
     assert "random" not in exc.value.message
+
+
+SHA = "5617a9f61b028005a4858fdac845db406aefb181"
+
+
+@pytest.mark.parametrize("requested", [SHA, "main"])
+def test_recorded_revision_is_the_snapshot_commit(requested: str) -> None:
+    snapshot = Path("/models/models--BAAI--bge-m3/snapshots") / SHA
+    assert resolved_revision(requested, snapshot) == SHA
+
+
+@pytest.mark.parametrize(
+    "snapshot_name",
+    ["0" * 40, "not-a-commit"],
+    ids=["other-commit", "not-a-commit"],
+)
+def test_snapshot_that_does_not_match_the_pinned_revision_is_refused(snapshot_name: str) -> None:
+    with pytest.raises(IngestionError) as exc:
+        resolved_revision(SHA, Path("/models/snapshots") / snapshot_name)
+    assert exc.value.code is ErrorCode.EMBEDDING_MODEL_UNAVAILABLE

@@ -11,10 +11,12 @@ depending on pooling configuration files in the model repository.
 Weights are fetched with :func:`huggingface_hub.snapshot_download` into ``cache_dir`` on
 first use (or ahead of time with ``python -m app.worker prepare-model``). Only the files
 needed for dense inference are downloaded; the ONNX export and the sparse/ColBERT heads are
-skipped. The resolved commit SHA is reported as the model revision.
+skipped. The resolved commit SHA is reported as the model revision and stored on every
+indexed document.
 """
 
 import logging
+import re
 import threading
 from collections.abc import Sequence
 from pathlib import Path
@@ -68,6 +70,24 @@ def resolve_device(requested: str) -> str:
             "EMBEDDING_DEVICE=cuda was requested but CUDA is not available on this machine.",
         )
     return requested
+
+
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def resolved_revision(requested: str, snapshot: Path) -> str:
+    """The commit SHA a snapshot directory (``.../snapshots/<commit sha>``) holds.
+
+    This SHA, not the requested branch or tag, is stored on every indexed document. When a
+    full commit SHA was requested, the snapshot must be that exact commit.
+    """
+    commit = snapshot.name
+    if not _COMMIT_SHA.match(commit) or (_COMMIT_SHA.match(requested) and commit != requested):
+        raise IngestionError(
+            ErrorCode.EMBEDDING_MODEL_UNAVAILABLE,
+            f"Model snapshot {commit!r} does not match the requested revision {requested!r}.",
+        )
+    return commit
 
 
 class BgeM3EmbeddingProvider(EmbeddingProvider):
@@ -172,13 +192,13 @@ class BgeM3EmbeddingProvider(EmbeddingProvider):
                 )
             self._model = model
             self._device = device
-            # snapshot_download returns .../snapshots/<commit sha>
-            self._info = EmbeddingModelInfo(self.model_name, snapshot.name, self.dimension)
+            revision = resolved_revision(self.revision, snapshot)
+            self._info = EmbeddingModelInfo(self.model_name, revision, self.dimension)
             logger.info(
                 "embedding_model_loaded",
                 extra={
                     "model": self.model_name,
-                    "revision": snapshot.name,
+                    "revision": revision,
                     "device": device,
                     "max_seq_length": self.max_seq_length,
                 },
