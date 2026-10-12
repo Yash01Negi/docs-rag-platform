@@ -1,9 +1,10 @@
 # Architecture
 
-This document describes what exists after **Phase 3 (Retrieval)** and where planned
-components will fit. Anything marked *planned* is not implemented yet. The ingestion
-pipeline is described in detail in [ingestion-pipeline.md](ingestion-pipeline.md), and
-search in [retrieval.md](retrieval.md).
+This document describes what exists after **Phase 4 (Conversational RAG)** and where
+planned components will fit. Anything marked *planned* is not implemented yet. The
+ingestion pipeline is described in detail in [ingestion-pipeline.md](ingestion-pipeline.md),
+search in [retrieval.md](retrieval.md), answers in [chat.md](chat.md) (protocol:
+[chat-api.md](chat-api.md); model providers: [llm-providers.md](llm-providers.md)).
 
 ## System overview
 
@@ -15,6 +16,7 @@ flowchart LR
         shell["App shell + dashboard<br/>live backend status"]
         docsui["Documents UI<br/>upload · library · details"]
         searchui["Search UI<br/>modes · filters · result cards"]
+        chatui["Chat UI<br/>history · streaming · citations"]
     end
 
     subgraph backend["backend/ · FastAPI (Python 3.12)"]
@@ -25,6 +27,9 @@ flowchart LR
         searchapi["/search API"]
         search["search/<br/>analyzer · BM25 · cosine · RRF · snippets"]
         qmodel["BGE-M3 query embedder<br/>(one thread)"]
+        chatapi["/conversations API<br/>CRUD · SSE answers"]
+        chat["chat/<br/>history · sources · prompt<br/>citation filter · persistence"]
+        llmp["llm/<br/>LLMProvider · Anthropic SDK"]
     end
 
     subgraph workerp["Ingestion worker · python -m app.worker"]
@@ -34,23 +39,25 @@ flowchart LR
     end
 
     subgraph data["PostgreSQL 17 + pgvector"]
-        pg[("documents · chunks<br/>vector(1024) + tsvector (GIN)<br/>ingestion_jobs")]
+        pg[("documents · chunks<br/>vector(1024) + tsvector (GIN)<br/>ingestion_jobs<br/>conversations · messages<br/>message_citations")]
     end
 
     files[("Original files<br/>LocalFileStorage")]
     cache[("Model cache")]
 
-    evalh["evaluation/<br/>judged EN/JA queries · metrics"]
-
-    subgraph later["Planned (later phases)"]
-        answer["Answer generation<br/>with citations"]
-    end
+    evalh["evaluation/<br/>judged EN/JA queries and questions · metrics"]
+    anthropic(["Anthropic API"])
 
     user --> shell
     user --> docsui
     user --> searchui
-    shell & docsui & searchui -- "/api/*" --> mw
-    mw --> health & docsapi & searchapi
+    user --> chatui
+    shell & docsui & searchui & chatui -- "/api/*" --> mw
+    mw --> health & docsapi & searchapi & chatapi
+    chatapi --> chat
+    chat --> search
+    chat --> pg
+    chat --> llmp --> anthropic
     searchapi --> search --> pg
     search --> qmodel
     cache --> qmodel
@@ -63,10 +70,7 @@ flowchart LR
     cache --> model
 
     evalh --> search
-    answer -.-> search
-
-    classDef planned stroke-dasharray: 5 5,fill:#f8fafc,color:#475569;
-    class answer planned;
+    evalh --> chat
 ```
 
 ## Components
@@ -90,6 +94,9 @@ flowchart LR
 | `app/embeddings/` | `EmbeddingProvider` interface, BGE-M3 provider, test-only fake provider ([ADR 0003](decisions/0003-local-bge-m3.md)) |
 | `app/search/` | Keyword analyzer (Sudachi + Snowball), keyword index rebuild, semantic/BM25 candidate queries, Reciprocal Rank Fusion, snippets, and `SearchService` ([retrieval.md](retrieval.md)) |
 | `app/api/v1/search.py` | `POST /search` and `GET /search/options` |
+| `app/llm/` | `LLMProvider` interface and the Anthropic implementation ([ADR 0007](decisions/0007-llm-provider.md), [llm-providers.md](llm-providers.md)) |
+| `app/chat/` | The answer pipeline: `ChatService` (history, retrieval, source selection, prompt, streaming, persistence), citation filter, token estimates, conversation queries ([chat.md](chat.md), [ADR 0008](decisions/0008-grounding-and-citations.md)) |
+| `app/api/v1/conversations.py` | Conversation endpoints and the Server-Sent Events stream ([chat-api.md](chat-api.md), [ADR 0009](decisions/0009-streaming-and-persistence.md)) |
 | `app/worker/` | Worker process: `run`, `prepare-model`, `healthcheck` and `rebuild-search-index` commands |
 | `evaluation/` | Judged bilingual evaluation set, metrics, the evaluation harness and benchmarks ([evaluation/](evaluation/README.md)) |
 | `alembic/` | Migration environment; reads `DATABASE_URL` through the same `Settings` class |
@@ -158,6 +165,7 @@ PostgreSQL 17 with pgvector 0.8.1 (`pgvector/pgvector:0.8.1-pg17`). See
 | `0001_enable_pgvector` | The `vector` extension |
 | `0002_documents` | `documents`, `chunks` (with `embedding vector(1024)`) and `ingestion_jobs`, with CHECK constraints for every status invariant |
 | `0003_keyword_search` | `chunks.search_vector` (`tsvector`, GIN index) and `chunks.search_length`, backfilled for existing chunks |
+| `0004_conversations` | `conversations`, `messages` (questions and answers with status, grounding, provider, model, usage and timings) and `message_citations` (one row per passage given to the model), with foreign keys that cascade on conversation delete, CHECK constraints, and unique indexes for one streaming answer per conversation, one answer per question and one question per client idempotency key |
 
 Columns and constraints are listed in [ingestion-pipeline.md](ingestion-pipeline.md#schema).
 There is deliberately no vector index: semantic search is exact, and
@@ -179,10 +187,12 @@ React 19 + TypeScript + Vite + Tailwind CSS v4, with React Router for navigation
 | `src/pages/DocumentsPage.tsx` | Upload and library with a status filter; polls while documents are pending or processing |
 | `src/pages/DocumentDetailPage.tsx` | Metadata, latest job, errors, chunk previews (opens at `?chunk=N` from a search result), download, retry, reindex and delete |
 | `src/pages/SearchPage.tsx`, `src/components/search/*` | Search with mode and filters kept in the URL, result cards with highlights, scores and method ranks |
-| `src/pages/*` | Dashboard (live system status), and placeholders for Chat and Evaluation |
+| `src/lib/chat.ts`, `src/lib/chatState.ts` | Chat API client, SSE parser (`fetch` streaming), and the reducer that turns stream events into the answer view |
+| `src/pages/ChatPage.tsx`, `src/components/chat/*` | Conversation sidebar, streaming answers rendered as sanitized Markdown, citation buttons, cited and related sources with document links, stop and retry |
+| `src/pages/*` | Dashboard (live system status), and a placeholder for Evaluation |
 
-The Chat and Evaluation pages are explicit placeholders labelled "Coming in a later
-milestone". They contain no mock data. Frontend tests use Vitest, jsdom and Testing Library
+The Evaluation page is an explicit placeholder labelled "Coming in a later milestone". No
+page contains mock data. Frontend tests use Vitest, jsdom and Testing Library
 (`src/**/*.test.tsx`).
 
 ### Local runtime (Docker Compose)
@@ -241,9 +251,10 @@ checked against it:
 2. **Retrieval** (Phase 3, implemented): semantic, keyword and hybrid search over chunks,
    with an evaluation set that measures them ([retrieval.md](retrieval.md)). No reranker:
    ADR 0006 explains what evidence would justify one.
-3. **Generation** (planned): an answer composed only from retrieved passages, returned with
-   citations (results already carry document, page and section).
-4. **Answer evaluation** (planned): extend the evaluation set with answer checks, so
-   changes to retrieval or prompts can be compared end to end.
-
-Answer-generation models are deliberately not chosen yet; each will get an ADR when it is.
+3. **Generation** (Phase 4, implemented): streamed answers composed from retrieved
+   passages with checked citations, in stored conversations ([chat.md](chat.md),
+   ADRs 0007 to 0009).
+4. **Answer evaluation** (Phase 4 harness, implemented; real-model run pending): judged
+   questions and lexical metrics ([evaluation/chat.md](evaluation/chat.md)). An evaluation
+   UI and model-based or human answer review are planned for Phase 5.
+5. **Deployment** (planned): production images, authentication, AWS.
