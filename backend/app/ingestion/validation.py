@@ -10,10 +10,9 @@ import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
-import pymupdf
-
 from app.db.models import FileType
 from app.ingestion.errors import ErrorCode, IngestionError
+from app.ingestion.pdf import PdfOpenError, PdfPasswordError, is_encrypted, open_pdf
 
 MIME_TYPES: dict[FileType, str] = {
     FileType.PDF: "application/pdf",
@@ -108,22 +107,27 @@ def validate_file(path: Path, filename: str) -> ValidatedFile:
 
 def _validate_pdf(path: Path) -> int:
     try:
-        document = pymupdf.open(path, filetype="pdf")
-    except Exception as exc:  # PyMuPDF raises several exception types for broken files
+        with open_pdf(path) as document:
+            # is_encrypted also catches PDFs with only an owner password, which open without
+            # one but are still encrypted files.
+            if is_encrypted(document):
+                raise _encrypted()
+            page_count = len(document)
+    except PdfPasswordError as exc:
+        raise _encrypted() from exc
+    except PdfOpenError as exc:
         raise IngestionError(
             ErrorCode.MALFORMED_PDF, "The PDF could not be opened; it may be damaged."
         ) from exc
-    with document:
-        # needs_pass: a password is required to open it. metadata["encryption"]: encrypted
-        # with only an owner password (opens without one, but is still an encrypted file).
-        if document.needs_pass or (document.metadata or {}).get("encryption"):
-            raise IngestionError(
-                ErrorCode.ENCRYPTED_PDF,
-                "Encrypted or password-protected PDFs are not supported.",
-            )
-        if document.page_count == 0:
-            raise IngestionError(ErrorCode.EMPTY_FILE, "The PDF has no pages.")
-        return int(document.page_count)
+    if page_count == 0:
+        raise IngestionError(ErrorCode.EMPTY_FILE, "The PDF has no pages.")
+    return page_count
+
+
+def _encrypted() -> IngestionError:
+    return IngestionError(
+        ErrorCode.ENCRYPTED_PDF, "Encrypted or password-protected PDFs are not supported."
+    )
 
 
 def _validate_utf8_text(path: Path) -> None:

@@ -16,7 +16,7 @@ flowchart TD
 
     subgraph api["API process (no model loaded)"]
         spool["Stream to staging file<br/>size limit · SHA-256"]
-        validate["Validate content<br/>PDF magic + PyMuPDF open · UTF-8 text"]
+        validate["Validate content<br/>PDF magic + PDFium open · UTF-8 text"]
         dedup{"sha256<br/>already stored?"}
         store["Store under generated key"]
         insert["INSERT document + ingest job<br/>(one transaction)"]
@@ -56,7 +56,7 @@ the worker can be restarted, scaled or moved to a machine with a GPU on its own.
    while it is streamed to a staging file and hashed.
 2. **Type.** The extension (`.pdf`, `.md`, `.markdown`, `.txt`) selects what the content is
    *expected* to be; the content decides whether it is accepted:
-   - PDF: `%PDF-` must appear in the first 1024 bytes, PyMuPDF must open the file, it must
+   - PDF: `%PDF-` must appear in the first 1024 bytes, PDFium (pypdfium2) must open the file, it must
      not be encrypted or password-protected, and it must have at least one page;
    - Markdown and text: must decode as UTF-8 (a BOM is allowed) and contain no NUL bytes.
    A renamed binary, a PDF named `.txt`, an empty file, or an unsupported extension is
@@ -156,7 +156,7 @@ Retryable errors are retried with exponential backoff: `WORKER_RETRY_BACKOFF_SEC
 | `file_too_large` | upload (413) | – | Over `MAX_UPLOAD_BYTES` |
 | `invalid_encoding` | upload (422) | – | Text or Markdown that is not UTF-8, or contains NUL bytes |
 | `encrypted_pdf` | upload (422) | – | Password-protected or encrypted PDF |
-| `malformed_pdf` | upload (422) | – | PyMuPDF cannot open the PDF |
+| `malformed_pdf` | upload (422) | – | PDFium cannot open the PDF |
 | `no_extractable_text` | worker | no | No text layer (for example a scanned PDF; OCR is not supported) |
 | `extraction_failed` | worker | no | The file opened at upload but text extraction failed |
 | `stored_file_missing` | worker | no | The stored original is gone |
@@ -176,13 +176,18 @@ Messages are short, written for users, and never contain paths or stack traces.
 
 | Format | Library | What is kept |
 | --- | --- | --- |
-| PDF | PyMuPDF (`get_text("blocks")`, de-hyphenated, reading order sorted) | Text blocks with their **page number**; the PDF outline (table of contents), when present, supplies the section for each page |
+| PDF | pypdfium2 (Google PDFium; BSD-3-Clause / Apache-2.0) | Text lines in content order with their **page number**, grouped into paragraphs by vertical spacing and font size; text outside the page's media box is dropped; words hyphenated across lines are re-joined; the PDF outline (table of contents), when present, supplies the section for each page |
 | Markdown | built-in parser | Paragraphs; ATX (`#`) and setext headings, tracked as a heading path such as `Guide > Install`; `#` lines inside fenced code are not mistaken for headings |
 | Plain text | built-in | Blank-line separated paragraphs; a short one-line paragraph that does not end in punctuation is treated as a heading |
 
 Line breaks inside a paragraph are joined with a space between Latin words and **without**
-a space between Japanese characters, so Japanese text wrapped across lines is not broken up
-by stray spaces.
+a space when either side is a Japanese (CJK) character, so Japanese text wrapped across lines
+is not broken up by stray spaces, including before numbers and Latin words.
+
+PDFium is not thread-safe. The API (validation) and the worker (extraction) call it from
+threads, so all PDFium use goes through `app/ingestion/pdf.py`, which serializes it with a
+process-wide lock. A large PDF being extracted therefore briefly delays PDF validation in the
+same process; the API and worker are separate processes, so they do not block each other.
 
 ## Chunking
 

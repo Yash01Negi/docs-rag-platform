@@ -134,7 +134,10 @@ def test_normalize_text_removes_control_characters_and_keeps_width() -> None:
     [
         (["東京は日本の", "首都です。"], "東京は日本の首都です。"),
         (["The quick", "brown fox"], "The quick brown fox"),
-        (["BGE-M3は", "multilingual"], "BGE-M3は multilingual"),
+        # A break next to a Japanese character is never a word boundary.
+        (["BGE-M3は", "multilingual"], "BGE-M3はmultilingual"),
+        (["それぞれのチャンクには", "1024次元"], "それぞれのチャンクには1024次元"),
+        (["stored in", "PostgreSQLに保存"], "stored in PostgreSQLに保存"),
         (["  spaced   out ", "", "line"], "spaced out line"),
     ],
 )

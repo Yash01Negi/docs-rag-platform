@@ -34,7 +34,7 @@ quality.
 | Docker Compose development stack with health checks | ✅ Implemented |
 | GitHub Actions CI (backend and frontend lint, tests, type check, build, compose validation) | ✅ Implemented |
 | Document upload with content validation, 20 MB limit and SHA-256 deduplication (PDF, Markdown, text) | ✅ Implemented |
-| Text extraction with page numbers and headings (PyMuPDF for PDF) | ✅ Implemented |
+| Text extraction with page numbers and headings (PDFium via pypdfium2 for PDF) | ✅ Implemented |
 | Japanese/English/mixed language detection and token-based multilingual chunking | ✅ Implemented |
 | Local BAAI/bge-m3 dense embeddings (1024-d) stored in pgvector | ✅ Implemented, ⚠️ real model unverified |
 | Database-backed ingestion worker (leases, retries, recovery, graceful shutdown) | ✅ Implemented |
@@ -53,7 +53,7 @@ quality.
 
 | Layer | Technology |
 | --- | --- |
-| Backend | Python 3.12, FastAPI, Pydantic v2, pydantic-settings, Uvicorn, PyMuPDF |
+| Backend | Python 3.12, FastAPI, Pydantic v2, pydantic-settings, Uvicorn, pypdfium2 (PDFium) |
 | Embeddings (worker only) | BAAI/bge-m3 via sentence-transformers and PyTorch (CPU, or Apple MPS on the host) |
 | Database | PostgreSQL 17, pgvector 0.8.1, SQLAlchemy 2 (async), psycopg 3, Alembic |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, React Router |
@@ -293,9 +293,12 @@ every pull request, plus `alembic check` and Docker Compose config validation.
   Do not expose the stack to the public internet.
 - Original files are stored on local disk (a Docker volume) with no backups. The storage
   interface is ready for object storage, but no S3 implementation exists.
-- **PyMuPDF is licensed under AGPL-3.0** (or a commercial license from Artifex). Running a
-  modified version of this project as a network service may carry AGPL obligations; check
-  before deploying it publicly or commercially.
+- PDF parsing uses [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) (Google's
+  PDFium; BSD-3-Clause / Apache-2.0), so the backend has no AGPL dependency. PyMuPDF
+  (AGPL-3.0) was used during early Phase 2 development and has been removed. The one
+  remaining weak-copyleft dependency is psycopg (LGPL-3.0), used unmodified as a library.
+  Paragraphs are rebuilt from line spacing and font size, so unusual layouts (multi-column
+  pages, tables) may be split differently from how they look.
 - The Docker setup is for local development only (Vite dev server, `uvicorn --reload`,
   source mounts). The worker image is large because of PyTorch.
 - The UI is in English only.
