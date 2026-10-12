@@ -325,6 +325,26 @@ def test_hybrid_falls_back_to_keyword_when_the_model_is_unavailable(
         assert "Traceback" not in semantic.text
 
 
+@pytest.mark.parametrize("failure", ["load", "embed"])
+def test_unexpected_model_errors_fall_back_like_an_unavailable_model(
+    db_settings: Settings, corpus: dict[str, uuid.UUID], failure: str
+) -> None:
+    with TestClient(create_app(db_settings)) as client:
+        provider = CrashingProvider(failure)
+        client.app.state.search.embedder.provider = provider  # type: ignore[attr-defined]
+        hybrid = _search(client, "backups", mode="hybrid")
+        assert hybrid.status_code == 200
+        assert hybrid.json()["semantic_available"] is False
+        assert hybrid.json()["results"][0]["chunk_id"] == str(corpus["en_backup"])
+
+        semantic = _search(client, "backups", mode="semantic")
+        assert semantic.status_code == 503
+        assert semantic.json()["error"]["code"] == "semantic_search_unavailable"
+        assert "boom" not in semantic.text  # the exception text is not exposed
+    if failure == "load":
+        assert provider.calls == 1  # the cooldown stops a reload on every request
+
+
 def test_search_does_not_hang_while_the_model_is_loading(
     make_settings, clean_database: str, corpus: dict[str, uuid.UUID]
 ) -> None:
@@ -388,6 +408,26 @@ class SlowProvider(FakeEmbeddingProvider):
         if not self.release.wait(timeout=10):
             raise IngestionError(ErrorCode.EMBEDDING_MODEL_UNAVAILABLE, "Test load timed out.")
         return super().load()
+
+
+class CrashingProvider(FakeEmbeddingProvider):
+    """Fails with an exception that is not an IngestionError, in load() or in embed()."""
+
+    def __init__(self, failure: str) -> None:
+        super().__init__(1024)
+        self.failure = failure
+        self.calls = 0
+
+    def load(self) -> EmbeddingModelInfo:
+        if self.failure == "load":
+            self.calls += 1
+            raise RuntimeError("boom")
+        return super().load()
+
+    def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        if self.failure == "embed":
+            raise RuntimeError("boom")
+        return super().embed(texts)
 
 
 class BrokenProvider(FakeEmbeddingProvider):

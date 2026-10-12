@@ -159,6 +159,13 @@ class QueryEmbedder:
             self._failed_at, self._failure = time.monotonic(), exc.message
             logger.warning("query_model_unavailable", extra={"error_code": exc.code.value})
             raise SearchUnavailableError(exc.message) from exc
+        except Exception as exc:
+            # Any other failure is treated the same way, so hybrid search still falls back to
+            # keyword results and the cooldown applies.
+            message = f"The embedding model could not be loaded ({type(exc).__name__})."
+            self._failed_at, self._failure = time.monotonic(), message
+            logger.exception("query_model_load_failed")
+            raise SearchUnavailableError(message) from exc
         finally:
             self._loading = None
         self._failed_at = self._failure = None
@@ -178,6 +185,9 @@ class QueryEmbedder:
                 ) from exc
             logger.warning("query_embedding_failed", extra={"error_code": exc.code.value})
             raise SearchUnavailableError(exc.message) from exc
+        except Exception as exc:
+            logger.exception("query_embedding_failed")
+            raise SearchUnavailableError(f"Query embedding failed ({type(exc).__name__}).") from exc
         return info, vectors[0]
 
     def close(self) -> None:
