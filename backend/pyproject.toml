@@ -12,6 +12,16 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.1,<2.2",
     "psycopg[binary]>=3.3,<4",
     "alembic>=1.20,<2",
+    "pgvector>=0.5,<0.6",
+    # PDF text extraction (PDFium; BSD-3-Clause / Apache-2.0). Replaces PyMuPDF (AGPL-3.0).
+    "pypdfium2>=5.14,<6",
+    "python-multipart>=0.0.32,<0.1",
+]
+
+[project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=6.1,<7",
+    "torch>=2.14,<2.15",
 ]
 
 [dependency-groups]
@@ -19,6 +29,7 @@ dev = [
     "pytest>=9.1,<10",
     "httpx2>=2.13,<3",  # HTTP client used by FastAPI's TestClient
     "ruff==0.17.0",
+    "pypdf>=6.20,<7",  # encrypts test PDFs (BSD-3-Clause); not a runtime dependency
 ]
 
 [build-system]
@@ -60,5 +71,17 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "integration: requires a running PostgreSQL + pgvector database (set TEST_DATABASE_URL)",
+    "model: downloads and runs the real BGE-M3 model (opt-in with RUN_MODEL_TESTS=1)",
 ]
 filterwarnings = ["error::DeprecationWarning:app.*"]
+
+# Linux (including the Docker worker) installs CPU-only PyTorch: the default PyPI wheels pull
+# in ~4 GB of CUDA libraries the worker never uses. macOS keeps the PyPI wheel, which
+# supports Apple's Metal (MPS) backend for native runs.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]

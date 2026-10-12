@@ -38,15 +38,18 @@ jobs:
       DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
       TEST_DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "0.11.32"
           python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
 
+      # The optional 'embeddings' extra (PyTorch, sentence-transformers) is deliberately
+      # not installed: tests use the deterministic fake provider, and the opt-in
+      # real-model smoke test is skipped unless RUN_MODEL_TESTS=1.
       - name: Install dependencies (from uv.lock)
         run: uv sync --locked
 
@@ -59,19 +62,22 @@ jobs:
       - name: Apply migrations
         run: uv run alembic upgrade head
 
+      - name: Check models match migrations
+        run: uv run alembic check
+
       - name: Pytest (unit + integration)
         run: uv run pytest
 
   frontend:
-    name: Frontend (lint + typecheck + build)
+    name: Frontend (lint + typecheck + tests + build)
     runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -86,6 +92,9 @@ jobs:
       - name: TypeScript check
         run: npm run typecheck
 
+      - name: Unit tests (Vitest)
+        run: npm test
+
       - name: Production build
         run: npm run build
 
@@ -93,9 +102,11 @@ jobs:
     name: Docker Compose config
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Validate docker-compose.yml
         run: |
           cp .env.example .env
           docker compose config --quiet
+          docker compose config --services | sort | tr '\n' ' ' | tee /dev/stderr \
+            | grep -q "backend db frontend migrate worker"

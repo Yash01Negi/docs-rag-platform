@@ -10,13 +10,14 @@ from alembic import context
 from sqlalchemy import create_engine, pool
 
 from app.core.config import Settings
+from app.db.models import Base
 
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# No ORM models yet; later phases will point this at the SQLAlchemy metadata.
-target_metadata = None
+# Used by `alembic revision --autogenerate` and by tests/test_schema.py to detect drift.
+target_metadata = Base.metadata
 
 
 def _database_url() -> str:

@@ -11,11 +11,15 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.api.v1.documents import router as documents_router
 from app.api.v1.health import router as health_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers, unhandled_exception_response
+from app.core.limits import MULTIPART_OVERHEAD_BYTES, BodySizeLimitMiddleware
 from app.core.logging import configure_logging, request_id_var
-from app.db.session import create_engine
+from app.db.session import create_engine, create_session_factory
+from app.services.documents import clean_staging_directory, staging_directory
+from app.storage import LocalFileStorage
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.engine = create_engine(settings)
+        app.state.sessions = create_session_factory(app.state.engine)
+        app.state.storage = LocalFileStorage(settings.storage_dir)
+        clean_staging_directory(staging_directory(settings.storage_dir))
         logger.info(
             "application_startup",
             extra={"environment": settings.environment.value, "version": __version__},
@@ -52,6 +59,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
 
     register_exception_handlers(app)
+
+    # Inside the request-context middleware, so its 413 responses carry the request ID.
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        path=f"{API_V1_PREFIX}/documents",
+        max_body_bytes=settings.max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
+    )
 
     @app.middleware("http")
     async def request_context(
@@ -90,4 +104,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(health_router, prefix=API_V1_PREFIX)
+    app.include_router(documents_router, prefix=API_V1_PREFIX)
     return app

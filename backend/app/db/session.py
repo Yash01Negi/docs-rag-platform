@@ -5,7 +5,12 @@ import logging
 from dataclasses import dataclass
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.core.config import Settings
 
@@ -21,6 +26,10 @@ def create_engine(settings: Settings) -> AsyncEngine:
         max_overflow=5,
         connect_args={"connect_timeout": max(1, round(settings.database_connect_timeout_seconds))},
     )
+
+
+def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 @dataclass(frozen=True)

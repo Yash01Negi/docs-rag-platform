@@ -1,6 +1,7 @@
 import os
 import uuid
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +16,12 @@ UNREACHABLE_DATABASE_URL = "postgresql+psycopg://yashrag:unused@127.0.0.1:1/yash
 
 
 @pytest.fixture
-def make_settings() -> Callable[..., Settings]:
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.fixture
+def make_settings(tmp_path: Path) -> Callable[..., Settings]:
     """Build Settings without reading the developer's .env file or environment."""
 
     def _make(**overrides: object) -> Settings:
@@ -25,6 +31,11 @@ def make_settings() -> Callable[..., Settings]:
             "cors_allowed_origins": "http://localhost:5173",
             "database_connect_timeout_seconds": 1,
             "readiness_timeout_seconds": 3,
+            "storage_dir": tmp_path / "uploads",
+            "model_cache_dir": tmp_path / "models",
+            "embedding_provider": "fake",
+            "worker_retry_backoff_seconds": 0,
+            "worker_poll_interval_seconds": 0.05,
         }
         values.update(overrides)
         return Settings(_env_file=None, **values)  # type: ignore[arg-type]
@@ -60,3 +71,28 @@ def empty_database_url(database_url: str) -> Iterator[str]:
         with admin.connect() as connection:
             connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+# Tables created by migration 0002, cleared before each test that uses ``clean_database``.
+_PHASE2_TABLES = ("ingestion_jobs", "chunks", "documents")
+
+
+@pytest.fixture
+def clean_database(database_url: str) -> Iterator[str]:
+    """The migrated test database with all document data removed before the test."""
+    engine = create_engine(database_url)
+    with engine.begin() as connection:
+        connection.execute(text(f"TRUNCATE {', '.join(_PHASE2_TABLES)} CASCADE"))
+    engine.dispose()
+    yield database_url
+
+
+@pytest.fixture
+def db_settings(make_settings: Callable[..., Settings], clean_database: str) -> Settings:
+    return make_settings(database_url=clean_database)
+
+
+@pytest.fixture
+def db_client(db_settings: Settings) -> Iterator[TestClient]:
+    with TestClient(create_app(db_settings)) as test_client:
+        yield test_client

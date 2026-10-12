@@ -3,7 +3,7 @@ from collections.abc import Callable
 import pytest
 from pydantic import ValidationError
 
-from app.core.config import Environment, Settings
+from app.core.config import BGE_M3_REVISION, Environment, Settings
 
 
 def test_settings_are_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,3 +62,41 @@ def test_invalid_log_level_is_rejected(make_settings: Callable[..., Settings]) -
 def test_invalid_environment_is_rejected(make_settings: Callable[..., Settings]) -> None:
     with pytest.raises(ValidationError, match="environment"):
         make_settings(environment="staging")
+
+
+def test_phase2_defaults(make_settings: Callable[..., Settings]) -> None:
+    settings = make_settings(embedding_provider="bge-m3")
+
+    assert settings.max_upload_bytes == 20 * 1024 * 1024
+    assert settings.embedding_model_name == "BAAI/bge-m3"
+    assert settings.embedding_model_revision == BGE_M3_REVISION
+    assert BGE_M3_REVISION == "5617a9f61b028005a4858fdac845db406aefb181"
+    assert settings.embedding_dimension == 1024
+    assert (settings.chunk_target_tokens, settings.chunk_overlap_tokens) == (400, 60)
+    assert settings.chunk_max_tokens == 440
+
+
+def test_fake_embeddings_require_test_environment(make_settings: Callable[..., Settings]) -> None:
+    with pytest.raises(ValidationError, match="only allowed when ENVIRONMENT=test"):
+        make_settings(environment="development", embedding_provider="fake")
+
+
+def test_embedding_dimension_must_match_schema(make_settings: Callable[..., Settings]) -> None:
+    with pytest.raises(ValidationError, match="1024"):
+        make_settings(embedding_dimension=768)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"chunk_target_tokens": 100, "chunk_overlap_tokens": 100}, "CHUNK_OVERLAP_TOKENS"),
+        ({"chunk_target_tokens": 100, "chunk_min_tokens": 100}, "CHUNK_MIN_TOKENS"),
+        ({"chunk_target_tokens": 1000, "embedding_max_seq_length": 1024}, "truncated"),
+        ({"worker_heartbeat_seconds": 60, "worker_lease_seconds": 30}, "HEARTBEAT"),
+    ],
+)
+def test_inconsistent_ingestion_settings_are_rejected(
+    make_settings: Callable[..., Settings], overrides: dict[str, object], message: str
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        make_settings(**overrides)
