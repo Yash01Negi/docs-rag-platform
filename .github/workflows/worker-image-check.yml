@@ -89,3 +89,79 @@ jobs:
           print('sentence-transformers', sentence_transformers.__version__)
           "
           docker run --rm --entrypoint python yashrag-worker:cpu -m app.worker --help || true
+
+  real-model:
+    name: Real BGE-M3 smoke test and PDF ingestion (temporary)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      MODEL_CACHE_DIR: /home/runner/models
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+
+      - name: Install with the embeddings extra (CPU-only PyTorch on Linux)
+        run: uv sync --locked --extra embeddings
+
+      - name: Download BAAI/bge-m3
+        env:
+          DATABASE_URL: postgresql+psycopg://unused:unused@127.0.0.1:1/unused
+        run: uv run --extra embeddings python -m app.worker prepare-model
+
+      - name: Real-model smoke test (RUN_MODEL_TESTS=1)
+        env:
+          RUN_MODEL_TESTS: "1"
+        run: uv run --extra embeddings pytest -m model -v -rs -p no:cacheprovider
+
+      - name: Index an English and a Japanese PDF with the real model
+        env:
+          DATABASE_URL: postgresql+psycopg://unused:unused@127.0.0.1:1/unused
+          EMBEDDING_DEVICE: cpu
+        run: |
+          uv run --extra embeddings python - <<'EOF'
+          import math, tempfile
+          from pathlib import Path
+
+          from app.core.config import Settings
+          from app.db.models import FileType
+          from app.embeddings import create_embedding_provider
+          from app.ingestion.chunking import ChunkingConfig
+          from app.ingestion.pipeline import build_index
+          from tests.samples import ENGLISH_TEXT, JAPANESE_TEXT, make_pdf
+
+          settings = Settings()
+          provider = create_embedding_provider(settings)
+          chunking = ChunkingConfig(
+              settings.chunk_target_tokens, settings.chunk_overlap_tokens, settings.chunk_min_tokens
+          )
+          folder = Path(tempfile.mkdtemp())
+          results = {}
+          for name, pages in {
+              "english.pdf": [ENGLISH_TEXT * 4, ENGLISH_TEXT * 3],
+              "japanese.pdf": [JAPANESE_TEXT * 4, JAPANESE_TEXT * 3],
+          }.items():
+              path = folder / name
+              path.write_bytes(make_pdf(pages))
+              result = build_index(path, FileType.PDF, provider, chunking)
+              norms = [math.sqrt(sum(v * v for v in vector)) for vector in result.vectors]
+              print(
+                  name, "language:", result.language, "pages:", result.page_count,
+                  "chunks:", len(result.chunks), "tokens:", [c.token_count for c in result.chunks],
+                  "pages per chunk:", [(c.page_start, c.page_end) for c in result.chunks],
+              )
+              print(
+                  "  model:", result.model.name, result.model.revision,
+                  "dims:", sorted({len(v) for v in result.vectors}),
+                  "norms:", [round(n, 6) for n in norms],
+              )
+              results[name] = result
+          en = results["english.pdf"].vectors[0]
+          ja = results["japanese.pdf"].vectors[0]
+          print("cosine(EN chunk 1, JA chunk 1):", round(sum(a * b for a, b in zip(en, ja)), 4))
+          EOF

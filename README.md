@@ -122,9 +122,10 @@ it resolved (useful for pinning `EMBEDDING_MODEL_REVISION`):
 docker compose run --rm worker python -m app.worker prepare-model
 ```
 
-The worker image is large (several GB): it contains PyTorch, and on Linux x86_64 the default
-PyTorch wheel pulls in CUDA libraries even though the container runs on CPU. The model
-weights are never part of the image. The worker container is limited to 4 CPUs and 6 GB of
+The worker image is about 1.3 GB (measured on a GitHub Actions runner): on Linux, uv
+installs CPU-only PyTorch from the PyTorch CPU wheel index, without the CUDA libraries the
+default PyPI wheel pulls in. On macOS the PyPI wheel is used so that host-native runs can use
+Apple's Metal (MPS) backend. The model weights are never part of the image. The worker container is limited to 4 CPUs and 6 GB of
 memory by default (`WORKER_CPUS`, `WORKER_MEMORY`); BGE-M3 on CPU needs roughly 4 to 6 GB.
 
 | Service | URL |
@@ -215,7 +216,7 @@ All configuration is read from environment variables (or `.env`). See
 | `EMBEDDING_MODEL_NAME` | no | Hugging Face model ID. Default `BAAI/bge-m3`. |
 | `EMBEDDING_MODEL_REVISION` | no | Branch, tag or commit SHA. Default `main`; pin a SHA for reproducible indexes. |
 | `EMBEDDING_DIMENSION` | no | Must be `1024` (the `vector(1024)` column). |
-| `EMBEDDING_DEVICE` | no | `auto` (MPS if available, else CPU), `cpu`, `mps` or `cuda`. Default `auto`; Compose uses `cpu`. |
+| `EMBEDDING_DEVICE` | no | `auto` (MPS if available, else CPU), `cpu`, `mps` or `cuda`. Default `auto`; Compose uses `cpu`. On Linux the locked PyTorch is CPU-only, so `cuda` needs a different PyTorch build. |
 | `EMBEDDING_BATCH_SIZE` | no | Chunks per model call. Default `16`; Compose uses `8`. |
 | `EMBEDDING_MAX_SEQ_LENGTH` | no | Longest model input in tokens; longer inputs are rejected, never truncated. Default `1024`. |
 | `MODEL_CACHE_DIR` | no | Model weights cache. Default `data/models`; `/models` (a named volume) in Docker. |
@@ -300,7 +301,8 @@ every pull request, plus `alembic check` and Docker Compose config validation.
   Paragraphs are rebuilt from line spacing and font size, so unusual layouts (multi-column
   pages, tables) may be split differently from how they look.
 - The Docker setup is for local development only (Vite dev server, `uvicorn --reload`,
-  source mounts). The worker image is large because of PyTorch.
+  source mounts). The worker image is about 1.3 GB because it contains PyTorch (CPU-only).
+  Building it needs access to `download.pytorch.org`.
 - The UI is in English only.
 
 ## Roadmap

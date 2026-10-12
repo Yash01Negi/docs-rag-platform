@@ -53,7 +53,9 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
   it resolved so it can be pinned. The resolved commit is stored on every indexed
   document (`documents.embedding_model_revision`).
 - Device selection: `EMBEDDING_DEVICE=auto` uses Apple's Metal (MPS) backend when PyTorch
-  reports it, otherwise CPU. CUDA works if explicitly requested but is not tested.
+  reports it, otherwise CPU. On Linux, PyTorch comes from PyTorch's CPU-only wheel index
+  (an explicit uv index in `backend/pyproject.toml`), so `cuda` is not available with the
+  locked dependencies; macOS uses the PyPI wheel, which supports MPS.
 
 ## Licensing
 
@@ -85,10 +87,13 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
   Silicon, running the worker on the host (not in Docker) lets it use MPS; Docker Desktop on
   macOS cannot reach the Apple GPU. No throughput numbers are claimed here; none were
   measured.
-- **Image size.** On Linux x86_64, the default PyTorch wheel from PyPI depends on the CUDA
-  libraries, which makes the worker image several gigabytes even though it runs on CPU.
-  Installing from PyTorch's CPU-only wheel index would shrink it a lot; that variant is not
-  set up or tested yet.
+- **Image size.** The default PyTorch wheels on PyPI for Linux (x86_64 and aarch64) depend
+  on about 4 GB of CUDA, cuDNN, NCCL and Triton packages, which made the first worker image
+  5.8 GB on disk. Linux now installs `torch==2.14.1+cpu` from the PyTorch CPU index, and the
+  worker image measured 1.32 GB (`docker image inspect`, GitHub Actions runner), with
+  `import torch` and a matrix multiply checked inside it. The cost: building the worker
+  image needs `download.pytorch.org` as well as PyPI, and GPU inference on Linux would need
+  a different PyTorch build.
 - **Not verified end to end here.** The real model could not be downloaded in the
   environment where Phase 2 was built (Hugging Face returned HTTP 403 through the network
   proxy). The provider code path was exercised with a small, randomly initialized local
