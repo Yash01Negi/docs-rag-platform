@@ -1,9 +1,15 @@
-# Local development stack: PostgreSQL + pgvector, the FastAPI backend and the Vite dev server.
+# Local development stack: PostgreSQL + pgvector, the FastAPI backend, the ingestion worker
+# and the Vite dev server.
 #
 #   cp .env.example .env
 #   docker compose up --build
 #
 # Frontend: http://localhost:5173   API: http://localhost:8000/api/v1/health
+#
+# The worker downloads BAAI/bge-m3 (about 2.3 GB) into the model-cache volume the first time
+# it processes a document. To download it ahead of time:
+#
+#   docker compose run --rm worker python -m app.worker prepare-model
 
 name: yashrag
 
@@ -29,7 +35,9 @@ services:
 
   # One-off job: applies Alembic migrations, then exits. The backend waits for it to succeed.
   migrate:
-    build: ./backend
+    build:
+      context: ./backend
+      target: api
     image: yashrag-backend:dev
     command: ["alembic", "upgrade", "head"]
     environment:
@@ -40,7 +48,9 @@ services:
     restart: "no"
 
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      target: api
     image: yashrag-backend:dev
     # --reload with the source mounted gives a fast edit/refresh loop in development.
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--reload"]
@@ -49,10 +59,53 @@ services:
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-20971520}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-3}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend/app:/app/app:ro
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Ingestion worker: claims jobs from PostgreSQL, extracts and chunks text and runs BGE-M3.
+  # The API never loads the model. Restart or scale it independently of the API.
+  worker:
+    build:
+      context: ./backend
+      target: worker
+    image: yashrag-worker:dev
+    environment:
+      DATABASE_URL: *database-url
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-BAAI/bge-m3}
+      EMBEDDING_MODEL_REVISION: ${EMBEDDING_MODEL_REVISION:-main}
+      # Docker on macOS cannot use the Apple GPU (MPS), so the container runs on CPU.
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-8}
+      EMBEDDING_LOCAL_FILES_ONLY: ${EMBEDDING_LOCAL_FILES_ONLY:-false}
+      CHUNK_TARGET_TOKENS: ${CHUNK_TARGET_TOKENS:-400}
+      CHUNK_OVERLAP_TOKENS: ${CHUNK_OVERLAP_TOKENS:-60}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-3}
+      # PyTorch CPU threads; keep at or below WORKER_CPUS.
+      OMP_NUM_THREADS: ${WORKER_TORCH_THREADS:-4}
+    volumes:
+      - ./backend/app:/app/app:ro
+      - uploads:/data/uploads
+      - model-cache:/models
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPUS:-4}"
+          memory: ${WORKER_MEMORY:-6g}
+    stop_grace_period: 45s
+    restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
@@ -82,3 +135,7 @@ services:
 
 volumes:
   postgres-data:
+  # Original uploaded files, shared by the API (writes) and the worker (reads).
+  uploads:
+  # Hugging Face cache with the BGE-M3 weights; survives container rebuilds.
+  model-cache:
