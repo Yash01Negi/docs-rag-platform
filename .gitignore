@@ -45,3 +45,6 @@ pgdata/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Evaluation output (published reports are copied into docs/evaluation/)
+backend/evaluation/results/
