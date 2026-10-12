@@ -88,6 +88,21 @@ class Settings(BaseSettings):
     worker_heartbeat_file: Path | None = None
     worker_preload_model: bool = False
 
+    # --- Search ---
+    search_default_top_k: int = Field(default=10, ge=1, le=100)
+    search_max_top_k: int = Field(default=50, ge=1, le=200)
+    search_max_query_chars: int = Field(default=1000, ge=10, le=10000)
+    # Candidates taken from each method before Reciprocal Rank Fusion, and the RRF constant k
+    # in 1 / (k + rank). 60 is the value from the original RRF paper (Cormack et al., 2009).
+    search_fusion_depth: int = Field(default=50, ge=1, le=1000)
+    search_rrf_k: int = Field(default=60, ge=1, le=1000)
+    # Okapi BM25 parameters for keyword search (the common defaults).
+    search_bm25_k1: float = Field(default=1.2, ge=0, le=10)
+    search_bm25_b: float = Field(default=0.75, ge=0, le=1)
+    search_snippet_chars: int = Field(default=280, ge=40, le=4000)
+    # Load the query-embedding model when the API starts instead of on the first search.
+    search_preload_model: bool = False
+
     @field_validator("log_level")
     @classmethod
     def _validate_log_level(cls, value: str) -> str:
@@ -143,6 +158,8 @@ class Settings(BaseSettings):
                 "CHUNK_TARGET_TOKENS + CHUNK_MIN_TOKENS + 2 must not exceed "
                 "EMBEDDING_MAX_SEQ_LENGTH, or chunks would be truncated by the model"
             )
+        if self.search_default_top_k > self.search_max_top_k:
+            raise ValueError("SEARCH_DEFAULT_TOP_K must not exceed SEARCH_MAX_TOP_K")
         if self.worker_heartbeat_seconds >= self.worker_lease_seconds:
             raise ValueError("WORKER_HEARTBEAT_SECONDS must be smaller than WORKER_LEASE_SECONDS")
         return self
