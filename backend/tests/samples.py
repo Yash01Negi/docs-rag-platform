@@ -1,7 +1,7 @@
 """Small documents generated on the fly for tests (no binary fixtures in the repository).
 
 PDFs are written by a tiny PDF writer below rather than by a PDF library, so the test suite
-does not depend on PyMuPDF (AGPL). Text uses one non-embedded Type 0 font with a ToUnicode
+does not depend on the parser it is testing. Text uses one non-embedded Type 0 font with a ToUnicode
 map, which is enough for any PDF text extractor to recover English and Japanese exactly.
 Encryption is applied with pypdf (BSD-3-Clause), a dev-only dependency.
 """

@@ -14,11 +14,11 @@ quality.
 > **Nothing reads the index yet:** retrieval, chat, citations and evaluation are not
 > implemented, and are marked as planned in the UI.
 >
-> **Not verified:** real BGE-M3 inference could not be run in the environment where Phase 2
-> was built (the model download was blocked). The pipeline was tested end to end with a
-> deterministic test-only embedding provider, and the real-model code path with a small
-> stand-in model. See [ADR 0003](docs/decisions/0003-local-bge-m3.md) and the opt-in
-> [real-model smoke test](#real-model-smoke-test).
+> **Real model:** BGE-M3 was verified on CPU on a GitHub Actions Linux runner (revision
+> `5617a9f61b028005a4858fdac845db406aefb181`): the [real-model smoke test](#real-model-smoke-test)
+> passed, and an English and a Japanese PDF were indexed into 1024-dimension, unit-norm
+> vectors. It was not run on Apple Silicon (MPS) or inside the Docker worker. See
+> [ADR 0003](docs/decisions/0003-local-bge-m3.md).
 
 ## Implementation status
 
@@ -36,7 +36,7 @@ quality.
 | Document upload with content validation, 20 MB limit and SHA-256 deduplication (PDF, Markdown, text) | ✅ Implemented |
 | Text extraction with page numbers and headings (PDFium via pypdfium2 for PDF) | ✅ Implemented |
 | Japanese/English/mixed language detection and token-based multilingual chunking | ✅ Implemented |
-| Local BAAI/bge-m3 dense embeddings (1024-d) stored in pgvector | ✅ Implemented, ⚠️ real model unverified |
+| Local BAAI/bge-m3 dense embeddings (1024-d) stored in pgvector | ✅ Implemented (real model verified on CPU) |
 | Database-backed ingestion worker (leases, retries, recovery, graceful shutdown) | ✅ Implemented |
 | Document management API (upload, list, details, chunks, file, retry, reindex, delete) | ✅ Implemented |
 | Documents UI (drag-and-drop upload, library, details, status polling) | ✅ Implemented |
@@ -285,8 +285,8 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 
 - **No retrieval, chat, citations or evaluation.** Documents are indexed, but nothing
   searches the vectors yet, and there is no approximate nearest-neighbour index.
-- **Real BGE-M3 output is unverified** in the environment where Phase 2 was built; see the
-  status note above.
+- Real BGE-M3 has been run on CPU only (GitHub Actions); MPS on Apple Silicon and the
+  Docker worker with the real model have not been tested. No throughput was measured.
 - No OCR: scanned PDFs fail with `no_extractable_text`. Only PDF, Markdown and plain text.
 - Dense vectors only; no sparse or multi-vector (ColBERT) retrieval.
 - No authentication or authorization, and therefore no per-user documents: anyone who can
@@ -310,7 +310,7 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 | Phase | Scope | Status |
 | --- | --- | --- |
 | 1. Foundation | Monorepo, FastAPI, PostgreSQL + pgvector, migrations, app shell, Docker, CI | ✅ Done |
-| 2. Ingestion | Document upload, JA/EN parsing and chunking, local BGE-M3 embeddings, worker, Documents UI | ✅ Implemented (real model unverified) |
+| 2. Ingestion | Document upload, JA/EN parsing and chunking, local BGE-M3 embeddings, worker, Documents UI | ✅ Implemented |
 | 3. Retrieval | Vector + keyword hybrid search, ANN index, reranking, retrieval API | 🕒 Next |
 | 4. Chat | Grounded answer generation with citations, chat UI | 🕒 Planned |
 | 5. Evaluation | Bilingual evaluation set, retrieval and answer-quality metrics, evaluation UI | 🕒 Planned |

@@ -94,12 +94,14 @@ Use **BAAI/bge-m3 dense embeddings, 1024 dimensions, run locally** by the ingest
   `import torch` and a matrix multiply checked inside it. The cost: building the worker
   image needs `download.pytorch.org` as well as PyPI, and GPU inference on Linux would need
   a different PyTorch build.
-- **Not verified end to end here.** The real model could not be downloaded in the
-  environment where Phase 2 was built (Hugging Face returned HTTP 403 through the network
-  proxy). The provider code path was exercised with a small, randomly initialized local
-  XLM-RoBERTa model, and an opt-in smoke test (`RUN_MODEL_TESTS=1`) exists for running the
-  real model wherever it can be downloaded. Until that test has passed somewhere, real
-  BGE-M3 output is unverified.
+- **Verified on CPU only.** The model could not be downloaded where Phase 2 was built
+  (Hugging Face returned HTTP 403 through the network proxy), so it was run on a GitHub
+  Actions Linux runner with the locked CPU-only PyTorch. `prepare-model` resolved revision
+  `5617a9f61b028005a4858fdac845db406aefb181`; the opt-in smoke test (`RUN_MODEL_TESTS=1`)
+  passed (4 tests); and indexing a generated English and Japanese PDF produced
+  1024-dimension, unit-norm vectors, with a cosine similarity of 0.85 between the first
+  English and first Japanese chunk (the same text in both languages). MPS on Apple Silicon
+  and the Docker worker image have not been run with the real model.
 - **Changing the model means reindexing.** The `chunks.embedding` column is `vector(1024)`.
   A model with another dimension needs a migration and a reindex of every document;
   settings validation refuses any other dimension.

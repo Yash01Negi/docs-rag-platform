@@ -301,5 +301,4 @@ python -m app.worker healthcheck      # exit 0 if the worker heartbeat is fresh
 - No ANN index; nothing reads the vectors yet because retrieval is not implemented.
 - One global deduplication namespace and no ownership, because there is no authentication.
 - The orphan file sweep runs only at worker startup.
-- Real BGE-M3 output has not been verified in the environment where this phase was built
-  (see ADR 0003).
+- Real BGE-M3 has been verified on CPU only (see ADR 0003); MPS has not been tested.
