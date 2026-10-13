@@ -347,8 +347,9 @@ class OllamaBackend(ProviderBackend):
     @property
     def notice(self) -> str | None:
         return (
-            "Runs on the server's own machine: no per-question cost, and prompts stay on "
-            "that machine. Answers are slower and usually less accurate than hosted models."
+            "Runs on the Ollama server this application is configured to use (normally the "
+            "same machine): no per-question cost, and prompts stay on that server. Answers "
+            "are slower and usually less accurate than hosted models."
         )
 
     def _shared_client(self) -> httpx2.AsyncClient:

@@ -180,9 +180,9 @@ class Settings(BaseSettings):
     llm_catalog_check_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
 
     llm_max_output_tokens: int = Field(default=2048, ge=64, le=64000)
-    # Sampling temperature for Claude and Gemini. Unset by default: current Claude models
-    # (Claude Opus 5.5 included) reject the parameter, so set it only for a model that
-    # accepts it. Ollama models use their own default.
+    # Sampling temperature, sent to every provider when set. Unset by default: current
+    # Claude models (Claude Opus 5.5 included) reject the parameter, so set it only when
+    # every configured model accepts it. Unset leaves each model's own default.
     llm_temperature: float | None = Field(default=None, ge=0, le=1)
     # Claude reasoning effort (output_config.effort). Unset uses the model's default.
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
@@ -269,6 +269,21 @@ class Settings(BaseSettings):
             if len(models) > MAX_MODELS_PER_PROVIDER:
                 raise ValueError(f"at most {MAX_MODELS_PER_PROVIDER} models per provider")
             return models
+        return value
+
+    @field_validator(
+        "llm_model",
+        "gemini_thinking_level",
+        "ollama_base_url",
+        "ollama_think",
+        "ollama_keep_alive",
+        mode="before",
+    )
+    @classmethod
+    def _empty_is_unset(cls, value: object) -> object:
+        # `LLM_MODEL=` in .env (or `${LLM_MODEL:-}` in Compose) means "not set".
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @field_validator("ollama_base_url")

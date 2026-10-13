@@ -249,3 +249,19 @@ def test_model_lists_are_parsed_and_deduplicated(make_settings: Callable[..., Se
     settings = make_settings(gemini_models=" gemini-a , gemini-b,gemini-a,, ")
     assert settings.gemini_models == ["gemini-a", "gemini-b"]
     assert make_settings(ollama_models="library/qwen3:8b").ollama_models == ["library/qwen3:8b"]
+
+
+def test_empty_values_mean_unset(make_settings: Callable[..., Settings]) -> None:
+    # Compose passes `${LLM_MODEL:-}` and .env.example has `OLLAMA_BASE_URL=`.
+    settings = make_settings(
+        llm_model="",
+        ollama_base_url="",
+        ollama_models="",
+        gemini_thinking_level="",
+        ollama_think="",
+        ollama_keep_alive=" ",
+    )
+    assert settings.llm_model is None and settings.default_model == "claude-opus-5-5"
+    assert settings.ollama_base_url is None and not settings.ollama_configured
+    assert settings.gemini_thinking_level is None and settings.ollama_think is None
+    assert settings.ollama_keep_alive is None

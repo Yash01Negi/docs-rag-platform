@@ -17,7 +17,7 @@ class Cost(StrEnum):
 
     PAID = "paid"  # billed per token to the server's account
     FREE_TIER = "free_tier"  # a provider's free tier: rate-limited, data may be used by it
-    LOCAL = "local"  # runs on the server's own machine (Ollama)
+    LOCAL = "local"  # runs on the configured Ollama server (normally the same machine)
 
 
 class AvailabilityState(StrEnum):

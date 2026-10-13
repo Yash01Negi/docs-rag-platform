@@ -29,7 +29,7 @@ flowchart LR
         qmodel["BGE-M3 query embedder<br/>(one thread)"]
         chatapi["/conversations API<br/>CRUD · SSE answers"]
         chat["chat/<br/>history · sources · prompt<br/>citation filter · persistence"]
-        llmp["llm/<br/>LLMProvider · Anthropic SDK"]
+        llmp["llm/<br/>LLMProvider · registry · catalog<br/>Anthropic · Gemini · Ollama"]
     end
 
     subgraph workerp["Ingestion worker · python -m app.worker"]
@@ -47,6 +47,8 @@ flowchart LR
 
     evalh["evaluation/<br/>judged EN/JA queries and questions · metrics"]
     anthropic(["Anthropic API"])
+    gemini(["Gemini API"])
+    ollama(["Ollama<br/>(local)"])
 
     user --> shell
     user --> docsui
@@ -57,7 +59,8 @@ flowchart LR
     chatapi --> chat
     chat --> search
     chat --> pg
-    chat --> llmp --> anthropic
+    chat --> llmp
+    llmp --> anthropic & gemini & ollama
     searchapi --> search --> pg
     search --> qmodel
     cache --> qmodel
@@ -94,7 +97,7 @@ flowchart LR
 | `app/embeddings/` | `EmbeddingProvider` interface, BGE-M3 provider, test-only fake provider ([ADR 0003](decisions/0003-local-bge-m3.md)) |
 | `app/search/` | Keyword analyzer (Sudachi + Snowball), keyword index rebuild, semantic/BM25 candidate queries, Reciprocal Rank Fusion, snippets, and `SearchService` ([retrieval.md](retrieval.md)) |
 | `app/api/v1/search.py` | `POST /search` and `GET /search/options` |
-| `app/llm/` | `LLMProvider` interface and the Anthropic implementation ([ADR 0007](decisions/0007-llm-provider.md), [llm-providers.md](llm-providers.md)) |
+| `app/llm/` | `LLMProvider` interface; Anthropic, Gemini and Ollama implementations; the provider registry and model catalog that validate each question's model choice ([ADR 0007](decisions/0007-llm-provider.md), [ADR 0010](decisions/0010-multiple-llm-providers.md), [llm-providers.md](llm-providers.md)) |
 | `app/chat/` | The answer pipeline: `ChatService` (history, retrieval, source selection, prompt, streaming, persistence), citation filter, token estimates, conversation queries ([chat.md](chat.md), [ADR 0008](decisions/0008-grounding-and-citations.md)) |
 | `app/api/v1/conversations.py` | Conversation endpoints and the Server-Sent Events stream ([chat-api.md](chat-api.md), [ADR 0009](decisions/0009-streaming-and-persistence.md)) |
 | `app/worker/` | Worker process: `run`, `prepare-model`, `healthcheck` and `rebuild-search-index` commands |
@@ -166,6 +169,7 @@ PostgreSQL 17 with pgvector 0.8.1 (`pgvector/pgvector:0.8.1-pg17`). See
 | `0002_documents` | `documents`, `chunks` (with `embedding vector(1024)`) and `ingestion_jobs`, with CHECK constraints for every status invariant |
 | `0003_keyword_search` | `chunks.search_vector` (`tsvector`, GIN index) and `chunks.search_length`, backfilled for existing chunks |
 | `0004_conversations` | `conversations`, `messages` (questions and answers with status, grounding, provider, model, usage and timings) and `message_citations` (one row per passage given to the model), with foreign keys that cascade on conversation delete, CHECK constraints, and unique indexes for one streaming answer per conversation, one answer per question and one question per client idempotency key |
+| `0005_requested_model` | `messages.requested_provider` and `messages.requested_model`: the model the user chose for an answer, next to the provider and model that answered. Existing answers are backfilled from `provider` and `model` |
 
 Columns and constraints are listed in [ingestion-pipeline.md](ingestion-pipeline.md#schema).
 There is deliberately no vector index: semantic search is exact, and

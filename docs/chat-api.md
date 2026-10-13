@@ -12,7 +12,8 @@ are under `/api/v1`. Interactive schemas are at `/docs` (OpenAPI) when the API r
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /chat/options` | Whether answering is configured, the model name and the limits clients validate against |
+| `GET /chat/options` | Whether answering is configured, the default provider and model, and the limits clients validate against |
+| `GET /chat/models?refresh=false` | The providers and models this server offers, with cost class and availability ([below](#choosing-a-model)) |
 | `POST /conversations` | Start a conversation (`{"title": "…"}` optional; otherwise the first question becomes the title). `201` |
 | `GET /conversations?limit=50&offset=0` | Conversations, most recently active first, with message counts |
 | `GET /conversations/{id}` | One conversation, its messages (oldest first, latest 500) and each answer's citations |
@@ -40,6 +41,10 @@ Accept: text/event-stream
     "mode": "semantic",                   // semantic | keyword | hybrid
     "document_ids": ["…"],                // only search these documents (1 to 100)
     "language": "ja"                      // only passages in this language: ja | en | mixed
+  },
+  "model": {                              // optional; omitted: the server default
+    "provider": "gemini",                 // a provider name from GET /chat/models
+    "model": "gemini-3.8-flash"           // one of that provider's listed models
   }
 }
 ```
@@ -56,12 +61,56 @@ are rejected.
 | 409 | `conversation_busy` | An answer is still being generated in this conversation (one at a time) |
 | 409 | `client_message_id_reused` | The key was used before for a different question |
 | 422 | `validation_error`, `question_too_long`, `unknown_document` | Invalid input |
+| 422 | `invalid_model` | `model` names a provider or model the server does not offer |
 | 429 | `too_many_generations` | `CHAT_MAX_CONCURRENT_GENERATIONS` answers are running in this process; `Retry-After: 5` |
-| 503 | `llm_not_configured` | No `ANTHROPIC_API_KEY`; reading and managing conversations still works |
+| 503 | `llm_not_configured` | No `model` was sent and the default provider has no credentials (for Claude: no `ANTHROPIC_API_KEY`); reading and managing conversations still works |
+| 503 | `provider_not_configured` | The chosen provider has no credentials (or, for Ollama, no base URL or models) |
+| 503 | `model_unavailable` | The provider reported the chosen model as unavailable (not offered, not installed, unreachable); the message says why |
 | 503 | `database_unavailable` | The database cannot be reached |
 
 Once the response is `200 text/event-stream`, every later failure arrives as an `error`
 event, and the stream then ends.
+
+### Choosing a model
+
+`GET /chat/models` lists what the server offers. It is built from server configuration
+only and never contains API keys or provider URLs:
+
+```json
+{
+  "providers": [
+    {"name": "anthropic", "label": "Anthropic Claude", "cost": "paid", "configured": false,
+     "reason": "ANTHROPIC_API_KEY is not set", "notice": "Paid API: …"},
+    {"name": "gemini", "label": "Google Gemini", "cost": "free_tier", "configured": true,
+     "reason": null, "notice": "Free tier: low rate limits, and Google may use …"},
+    {"name": "ollama", "label": "Ollama (local)", "cost": "local", "configured": true, "reason": null,
+     "notice": "Runs on the Ollama server …"}
+  ],
+  "models": [
+    {"provider": "gemini", "provider_label": "Google Gemini", "model": "gemini-3.8-flash",
+     "cost": "free_tier", "configured": true,
+     "availability": {"state": "available", "reason": null},
+     "selectable": true, "default": false},
+    {"provider": "ollama", "provider_label": "Ollama (local)", "model": "gemma3:12b",
+     "cost": "local", "configured": true,
+     "availability": {"state": "unavailable", "reason": "Not installed in Ollama. Run `ollama pull gemma3:12b` on the Ollama host."},
+     "selectable": false, "default": false}
+  ],
+  "default": {"provider": "anthropic", "model": "claude-opus-5-5"}
+}
+```
+
+- `cost` is `paid`, `free_tier` or `local`.
+- `availability.state` is `available` (the provider confirmed it), `unavailable` (with a
+  reason) or `unknown` (not checked yet, or the check failed; asking may still work).
+- `selectable` is `configured` and not `unavailable`. Only selectable models are accepted.
+- Results are cached for `LLM_CATALOG_TTL_SECONDS`; `?refresh=true` checks again (at most
+  every 10 seconds).
+
+Send the chosen pair as `model` with a question. The server validates it against the
+catalog every time and answers with exactly that model or an error; it never substitutes
+another provider or model, and a failure mid-answer is reported, not retried elsewhere.
+`model` may change from one question to the next in the same conversation.
 
 ### Retries and idempotency
 
@@ -69,10 +118,11 @@ Send a fresh `client_message_id` with each new question and reuse it when retryi
 question (after a network error, or with the Retry button):
 
 - If that question already has a **complete** answer, the stored answer is replayed as a
-  normal event stream (`start.replayed` is `true`). The model is not called again and
-  nothing is stored twice.
+  normal event stream (`start.replayed` is `true`), whatever `model` the retry names. The
+  model is not called again and nothing is stored twice.
 - If its answer **failed or was stopped**, a new answer is generated and replaces the old
-  one in the same position. The question is not stored again.
+  one in the same position. The question is not stored again. The retry may name a
+  different `model` (for example after a rate limit); the new answer records it.
 - The same key with different question text is rejected (`409 client_message_id_reused`).
 
 Without a key, every request stores a new question.
@@ -126,7 +176,7 @@ after `start` (or as the only event, in the rare case described below).
 
 | Event | Data | Notes |
 | --- | --- | --- |
-| `start` | `request_id`, `conversation_id`, `user_message_id`, `assistant_message_id`, `provider`, `model`, `replayed` | The question and an empty answer (status `streaming`) are stored before this event. `model` is the configured model |
+| `start` | `request_id`, `conversation_id`, `user_message_id`, `assistant_message_id`, `provider`, `model`, `replayed` | The question and an empty answer (status `streaming`) are stored before this event. `provider` and `model` are the ones answering (the chosen model, or the default) |
 | `sources` | `retrieval` {`mode`, `semantic_available`, `warnings`, `duration_ms`}, `sources` [Source] | Every passage given to the model, numbered `index` 1..n. If semantic search is unavailable the sources come from keyword search and a warning says so |
 | `delta` | `text` | The next piece of the answer (Markdown). Citation markers in it are already checked: see below |
 | `citations` | `citations` [Source + `supporting`], `invalid_markers_removed` | Every source again, with `supporting: true` for those the answer cites and `false` for context that was given but not cited |
@@ -166,10 +216,11 @@ still stored as complete. A `refusal` is stored as failed with code `model_refus
 | `provider_bad_request`, `provider_request_too_large`, `provider_model_not_found` | no | Configuration or request problem on the server |
 | `model_refused` | no | The model declined to answer |
 | `internal_error` | yes | An unexpected server error |
-| `conversation_busy`, `already_answered`, `too_many_generations`, `llm_not_configured`, `conversation_not_found` | varies | A race the pre-stream check could not see (another request got there first); these come as the only event, before `start` |
+| `conversation_busy`, `already_answered`, `too_many_generations`, `llm_not_configured`, `provider_not_configured`, `model_unavailable`, `invalid_model`, `conversation_not_found` | varies | A race the pre-stream check could not see (another request got there first); these come as the only event, before `start` |
 
-The SDK retries connection errors, 408, 409, 429 and 5xx up to `LLM_MAX_RETRIES` times
-before any text has streamed. After text has streamed, a failure is not retried: the partial
+Each provider retries connection errors, 408, 429 and 5xx (Claude also 409) up to
+`LLM_MAX_RETRIES` times before any text has streamed. A failure is never retried with a
+different provider or model. After text has streamed, a failure is not retried: the partial
 text is kept, the answer is stored as `failed`, and the client can retry with the same
 `client_message_id`.
 
@@ -210,7 +261,9 @@ as `cancelled`).
 `assistant`), `content` (answers keep their checked `[S<n>]` markers), `status`
 (`complete`, `streaming`, `failed`, `cancelled`), `created_at`, `completed_at`,
 `client_message_id`, `reply_to_id` (the question an answer belongs to), `grounding`,
-`error_code`, `error_message`, `provider`, `model`, `served_model`, `stop_reason`, `usage`,
+`error_code`, `error_message`, `requested_provider`, `requested_model` (what the user
+chose), `provider`, `model` (what the server called), `served_model` (what answered),
+`stop_reason`, `usage`,
 `retrieval_mode`, `timings_ms` and `citations`.
 
 Each stored citation is a Source with `supporting` plus where the passage is **now**:

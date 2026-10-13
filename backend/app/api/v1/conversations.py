@@ -403,7 +403,7 @@ class ProviderOut(BaseModel):
     label: str
     cost: Cost = Field(
         description="paid: billed per token. free_tier: a provider's free tier (rate-limited; "
-        "the provider may use the data). local: runs on the server's own machine."
+        "the provider may use the data). local: runs on the configured Ollama server."
     )
     configured: bool
     reason: str | None = Field(description="Why the provider is not configured.")
