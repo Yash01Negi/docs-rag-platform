@@ -305,8 +305,9 @@ def test_llm_not_configured(make_client: Callable[..., TestClient], docs: dict) 
 def test_chat_options(make_client: Callable[..., TestClient]) -> None:
     options = make_client(ScriptedProvider()).get("/api/v1/chat/options").json()
     assert options["configured"] is True
-    assert options["provider"] == "anthropic"
-    assert options["model"] == "claude-opus-5-5"
+    # The default model is the one that answers (here the test double), since Phase 4.1.
+    assert options["provider"] == "test-double"
+    assert options["model"] == "scripted-model"
     assert options["default_retrieval_mode"] == "semantic"
     assert options["max_question_chars"] == 4000
 

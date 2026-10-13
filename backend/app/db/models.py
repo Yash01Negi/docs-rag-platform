@@ -292,8 +292,13 @@ class Message(Base):
     grounding: Mapped[str | None] = mapped_column(String(32))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
-    # Generation metadata (assistant messages). ``model`` is the configured model and
-    # ``served_model`` the one that answered (they differ after a provider fallback).
+    # Generation metadata (assistant messages). ``requested_provider``/``requested_model``
+    # are what the question asked for (the selection, or the default) and are always set;
+    # ``provider``/``model`` are what was called (unset when no model was called, e.g. no
+    # passage matched); ``served_model`` is the model that answered (it differs from
+    # ``model`` after a Claude server-side fallback).
+    requested_provider: Mapped[str | None] = mapped_column(String(32))
+    requested_model: Mapped[str | None] = mapped_column(String(128))
     provider: Mapped[str | None] = mapped_column(String(32))
     model: Mapped[str | None] = mapped_column(String(128))
     served_model: Mapped[str | None] = mapped_column(String(128))

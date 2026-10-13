@@ -1,9 +1,11 @@
 """Application settings, loaded from environment variables (and an optional .env file)."""
 
+import re
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -16,6 +18,16 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 EMBEDDING_DIMENSION = 1024
 # The BAAI/bge-m3 commit on the Hugging Face Hub that Phase 2 was verified with.
 BGE_M3_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
+
+
+# Model IDs as Claude, Gemini and Ollama spell them ("claude-opus-5-5", "gemini-3.8-flash",
+# "qwen3:8b", "library/model:tag"). Anything else is rejected at startup.
+_MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$")
+MAX_MODELS_PER_PROVIDER = 20
+
+
+def _has_secret(value: SecretStr | None) -> bool:
+    return value is not None and bool(value.get_secret_value().strip())
 
 
 class Environment(StrEnum):
@@ -109,28 +121,82 @@ class Settings(BaseSettings):
     # back to keyword results (and semantic search answers 503). The load continues.
     search_model_load_wait_seconds: float = Field(default=20.0, ge=0, le=600)
 
-    # --- LLM provider (Phase 4 chat) ---
-    # Only "anthropic" is implemented. Without ANTHROPIC_API_KEY the chat endpoints answer
-    # 503 llm_not_configured; conversations can still be listed, read, renamed and deleted.
-    llm_provider: Literal["anthropic"] = "anthropic"
-    # Read by this application only and sent only to the provider; never logged or returned.
+    # --- LLM providers and models (Phase 4 chat, Phase 4.1 multi-model) ---
+    # The browser picks a model from the catalog built from these settings (GET
+    # /chat/models); it can never name a provider, model or URL that is not listed here.
+    # LLM_PROVIDER and LLM_MODEL are the default used when a request names no model. A
+    # provider without credentials (or, for Ollama, without a base URL and models) is listed
+    # as not configured; without any configured provider the chat endpoints answer 503.
+    llm_provider: Literal["anthropic", "gemini", "ollama"] = "anthropic"
+    # Unset means the first model in the default provider's list.
+    llm_model: str | None = Field(default=None, min_length=1, max_length=128)
+
+    # Anthropic Claude (paid API). Read by this application only and sent only to the
+    # provider; never logged or returned.
     anthropic_api_key: SecretStr | None = None
-    llm_model: str = Field(default="claude-opus-5-5", min_length=1, max_length=128)
+    # Comma-separated model IDs offered in the model selector. The defaults are the current
+    # Claude models listed in Anthropic's model overview on 2026-10-13; the server also asks
+    # the Models API whether each one is available to the configured key.
+    anthropic_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    )
+
+    # Google Gemini, through the official Google Gen AI SDK (Gemini Developer API).
+    gemini_api_key: SecretStr | None = None
+    # The defaults are the stable Flash and Flash-Lite models listed in the Gemini API model
+    # documentation on 2026-10-13; availability is checked against the API's model list.
+    gemini_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    )
+    # Which Gemini API tier the key's project is on. It only labels the models ("free tier"
+    # or "paid"); Google decides the tier from the project's billing. On the free tier,
+    # Google may use prompts and answers to improve its products (docs/llm-providers.md).
+    gemini_tier: Literal["free", "paid"] = "free"
+    # Gemini 3 thinking level; unset uses each model's default. Thoughts are never shown or
+    # stored, but they count as (billed) output tokens.
+    gemini_thinking_level: Literal["minimal", "low", "medium", "high"] | None = None
+
+    # Ollama (local models over its HTTP API). Both a base URL and at least one model are
+    # needed. From Docker Desktop on macOS use http://host.docker.internal:11434; for the
+    # API running directly on the host, http://localhost:11434.
+    ollama_base_url: str | None = None
+    # Comma-separated allowlist of local model names, e.g. "qwen3:8b,gemma3:12b". Only
+    # models that are also installed (`ollama pull`) are offered as available.
+    ollama_models: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    # Context window requested from Ollama. Ollama's own default (4096 tokens) is smaller
+    # than the chat prompt can be, and Ollama silently drops the start of a longer prompt.
+    ollama_num_ctx: int = Field(default=16384, ge=2048, le=1048576)
+    # Ollama's "think" option: unset leaves each model's default. Thinking text is dropped.
+    ollama_think: bool | None = None
+    # How long Ollama keeps the model loaded after a request, e.g. "5m" (unset: its default).
+    ollama_keep_alive: str | None = Field(default=None, pattern=r"^(-1|0|\d+(\.\d+)?(ms|s|m|h))$")
+    # Ollama "cloud" models run on ollama.com, not on this machine; they are refused unless
+    # this is true, so a "local" choice never sends documents elsewhere.
+    ollama_allow_remote_models: bool = False
+
+    # How long a model availability check (Models API, Ollama's model list) is reused.
+    llm_catalog_ttl_seconds: float = Field(default=300.0, ge=0, le=86400)
+    # Timeout for one availability check.
+    llm_catalog_check_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+
     llm_max_output_tokens: int = Field(default=2048, ge=64, le=64000)
-    # Sampling temperature. Unset by default: current Claude models (Claude Opus 5.5
-    # included) reject the parameter, so set it only for a model that accepts it.
+    # Sampling temperature for Claude and Gemini. Unset by default: current Claude models
+    # (Claude Opus 5.5 included) reject the parameter, so set it only for a model that
+    # accepts it. Ollama models use their own default.
     llm_temperature: float | None = Field(default=None, ge=0, le=1)
-    # Reasoning effort (output_config.effort). Unset uses the model's default.
+    # Claude reasoning effort (output_config.effort). Unset uses the model's default.
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
-    # Server-side fallback when the requested model declines a request on policy grounds
-    # ("default" lets the API choose the substitute model; "none" turns it off).
+    # Claude server-side fallback when the requested model declines a request on policy
+    # grounds ("default" lets the API choose the substitute Claude model; "none" turns it
+    # off). It never switches to another provider.
     llm_fallbacks: Literal["default", "none"] = "default"
     # Connect timeout, and the longest wait for the next chunk of a streamed response.
     llm_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     llm_read_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     # Upper bound for one whole answer, including retries before the first token.
     llm_request_timeout_seconds: float = Field(default=180.0, gt=0, le=1800)
-    # SDK retries for connection errors, 408, 409, 429 and 5xx before any output streams.
+    # Retries for connection errors, 408, 409, 429 and 5xx before any output streams (the
+    # SDKs' own retries for Claude and Gemini, the application's for Ollama).
     llm_max_retries: int = Field(default=2, ge=0, le=10)
 
     # --- Chat ---
@@ -188,6 +254,35 @@ class Settings(BaseSettings):
             return [origin.rstrip("/") for origin in value]
         return value
 
+    @field_validator("anthropic_models", "gemini_models", "ollama_models", mode="before")
+    @classmethod
+    def _parse_models(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = [model.strip() for model in value.split(",") if model.strip()]
+        if isinstance(value, list):
+            models: list[str] = []
+            for model in value:
+                if not isinstance(model, str) or not _MODEL_ID.match(model):
+                    raise ValueError(f"invalid model ID: {model!r}")
+                if model not in models:
+                    models.append(model)
+            if len(models) > MAX_MODELS_PER_PROVIDER:
+                raise ValueError(f"at most {MAX_MODELS_PER_PROVIDER} models per provider")
+            return models
+        return value
+
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _validate_ollama_base_url(cls, value: str | None) -> str | None:
+        if value is None or not value.strip():
+            return None
+        parsed = urlsplit(value.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("OLLAMA_BASE_URL must be an http:// or https:// URL")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError("OLLAMA_BASE_URL must not contain credentials, a query or a fragment")
+        return value.strip().rstrip("/")
+
     @field_validator("embedding_dimension")
     @classmethod
     def _validate_embedding_dimension(cls, value: int) -> int:
@@ -216,14 +311,53 @@ class Settings(BaseSettings):
             raise ValueError("SEARCH_DEFAULT_TOP_K must not exceed SEARCH_MAX_TOP_K")
         if self.chat_retrieval_top_k > self.search_max_top_k:
             raise ValueError("CHAT_RETRIEVAL_TOP_K must not exceed SEARCH_MAX_TOP_K")
+        if self.llm_model is not None and not _MODEL_ID.match(self.llm_model):
+            raise ValueError(f"invalid LLM_MODEL: {self.llm_model!r}")
         if self.worker_heartbeat_seconds >= self.worker_lease_seconds:
             raise ValueError("WORKER_HEARTBEAT_SECONDS must be smaller than WORKER_LEASE_SECONDS")
         return self
 
     @property
     def llm_configured(self) -> bool:
-        key = self.anthropic_api_key
-        return key is not None and bool(key.get_secret_value().strip())
+        """True when the Anthropic API key is set (kept for Phase 4 callers)."""
+        return _has_secret(self.anthropic_api_key)
+
+    @property
+    def gemini_configured(self) -> bool:
+        return _has_secret(self.gemini_api_key)
+
+    @property
+    def ollama_configured(self) -> bool:
+        return self.ollama_base_url is not None and bool(self.ollama_models)
+
+    def provider_models(self, provider: str) -> list[str]:
+        """The models offered for a provider, the default model included."""
+        models = {
+            "anthropic": self.anthropic_models,
+            "gemini": self.gemini_models,
+            "ollama": self.ollama_models,
+        }[provider]
+        if provider == self.llm_provider and self.llm_model and self.llm_model not in models:
+            # A model named only in LLM_MODEL stays selectable, as in Phase 4.
+            return [self.llm_model, *models]
+        return list(models)
+
+    def first_model(self, provider: str) -> str:
+        """LLM_MODEL for the default provider, otherwise the provider's first model."""
+        if provider == self.llm_provider and self.llm_model:
+            return self.llm_model
+        models = self.provider_models(provider)
+        if not models:
+            raise ValueError(f"no models are configured for {provider}")
+        return models[0]
+
+    @property
+    def default_model(self) -> str | None:
+        """LLM_MODEL, or the first model listed for the default provider."""
+        if self.llm_model:
+            return self.llm_model
+        models = self.provider_models(self.llm_provider)
+        return models[0] if models else None
 
     @property
     def chunk_max_tokens(self) -> int:

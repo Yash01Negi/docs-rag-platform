@@ -23,6 +23,10 @@ dependencies = [
     "snowballstemmer>=3.1,<4",
     # Chat answers (Phase 4): the official Anthropic SDK (MIT).
     "anthropic>=1.13,<2",
+    # Gemini answers (Phase 4.1): the official Google Gen AI SDK (Apache-2.0).
+    "google-genai>=2.30,<3",
+    # HTTP client for the Ollama API (BSD-3-Clause); also used by the Anthropic SDK.
+    "httpx2>=2.13,<3",
 ]
 
 [project.optional-dependencies]

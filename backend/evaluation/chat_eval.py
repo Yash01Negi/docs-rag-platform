@@ -300,7 +300,9 @@ def make_provider(kind: str, settings: Settings) -> LLMProvider:
     provider = create_llm_provider(settings)
     if provider is None:
         raise EvaluationError(
-            "--provider configured needs a configured model provider (ANTHROPIC_API_KEY)"
+            "--provider configured needs the default model's provider to be configured "
+            "(LLM_PROVIDER/LLM_MODEL, and ANTHROPIC_API_KEY, GEMINI_API_KEY or "
+            "OLLAMA_BASE_URL/OLLAMA_MODELS)"
         )
     return provider
 
@@ -563,7 +565,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--provider",
         choices=("extractive", "configured"),
         default="extractive",
-        help="extractive: the non-LLM baseline; configured: the model in the settings",
+        help="extractive: the non-LLM baseline; configured: the default model in the settings "
+        "(LLM_PROVIDER and LLM_MODEL choose Claude, Gemini or an Ollama model)",
     )
     parser.add_argument("--mode", choices=[m.value for m in SearchMode], default=None)
     parser.add_argument("--questions", default="", help="comma-separated ids (default: all)")
