@@ -25,6 +25,7 @@ export interface AssistantView {
   sources: DisplaySource[]
   /** Cited source numbers; null until the server has checked the citations. */
   cited: number[] | null
+  provider: string | null
   model: string | null
   servedModel: string | null
   stopReason: string | null
@@ -51,6 +52,7 @@ export function emptyAnswer(): AssistantView {
     grounding: null,
     sources: [],
     cited: null,
+    provider: null,
     model: null,
     servedModel: null,
     stopReason: null,
@@ -69,7 +71,12 @@ export function applyEvent(turn: LiveTurn, event: ChatStreamEvent): LiveTurn {
       return {
         ...turn,
         userMessageId: event.data.user_message_id,
-        answer: { ...answer, id: event.data.assistant_message_id, model: event.data.model },
+        answer: {
+          ...answer,
+          id: event.data.assistant_message_id,
+          provider: event.data.provider,
+          model: event.data.model,
+        },
       }
     case 'sources':
       return {
@@ -126,6 +133,7 @@ export function storedAnswer(message: ChatMessage): AssistantView {
     grounding: message.grounding,
     sources: message.citations,
     cited: message.citations.filter((c) => c.supporting).map((c) => c.index),
+    provider: message.provider,
     model: message.model,
     servedModel: message.served_model,
     stopReason: message.stop_reason,

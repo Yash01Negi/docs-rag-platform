@@ -12,6 +12,12 @@ const GROUNDING_NOTES: Partial<Record<Grounding, string>> = {
   uncited: 'This answer does not cite any passage. Check it against the documents.',
 }
 
+const PROVIDER_NAMES: Record<string, string> = {
+  anthropic: 'Claude',
+  gemini: 'Gemini',
+  ollama: 'Ollama',
+}
+
 function formatSeconds(ms: number | null): string | null {
   return ms === null ? null : `${(ms / 1000).toFixed(1)} s`
 }
@@ -51,8 +57,12 @@ export default function AssistantMessage({ message, onRetry, retryDisabled }: Pr
   const note = message.grounding ? GROUNDING_NOTES[message.grounding] : undefined
   const model = message.servedModel ?? message.model
   const fellBack = Boolean(message.servedModel && message.model && message.servedModel !== message.model)
+  const via = message.provider ? ` (${PROVIDER_NAMES[message.provider] ?? message.provider})` : ''
   const meta = [
-    model && (fellBack ? `Answered by ${model} (fallback from ${message.model})` : `Answered by ${model}`),
+    model &&
+      (fellBack
+        ? `Answered by ${model}${via}, fallback from ${message.model}`
+        : `Answered by ${model}${via}`),
     formatSeconds(message.totalMs),
     message.usage ? `${message.usage.input_tokens + message.usage.output_tokens} tokens` : null,
   ].filter(Boolean)
