@@ -8,7 +8,9 @@ the database end to end, then checks the documents through the API.
     TEST_DATABASE_URL=... uv run pytest tests/test_s3_smoke.py -m s3_smoke
 
 S3_SMOKE_WRITE=1 lets the test create, change and delete objects under a fresh prefix (use
-an emulator or a scratch bucket). Without it the test is read-only: it imports what is
+an emulator or a scratch bucket); S3_SMOKE_WRITER_ACCESS_KEY_ID and
+S3_SMOKE_WRITER_SECRET_ACCESS_KEY give the test's own writes separate keys, so the connector
+itself can run with read-only credentials. Without it the test is read-only: it imports what is
 already under S3_SMOKE_PREFIX, which needs only the IAM policy in docs/s3-setup.md.
 See docs/s3-smoke-tests.md.
 """
@@ -70,11 +72,22 @@ def settings(make_settings: Callable[..., Settings], clean_database: str, prefix
 
 @pytest.fixture
 def writer(settings: Settings, prefix: str) -> Iterator[Any]:
-    """A separate client for creating test objects (the connector itself only reads)."""
+    """A separate client for creating test objects (the connector itself only reads).
+
+    S3_SMOKE_WRITER_ACCESS_KEY_ID / S3_SMOKE_WRITER_SECRET_ACCESS_KEY give it its own keys,
+    so the connector can run with read-only credentials; otherwise it uses the AWS chain.
+    """
+    keys: dict[str, str] = {}
+    if os.environ.get("S3_SMOKE_WRITER_ACCESS_KEY_ID"):
+        keys = {
+            "aws_access_key_id": os.environ["S3_SMOKE_WRITER_ACCESS_KEY_ID"],
+            "aws_secret_access_key": os.environ.get("S3_SMOKE_WRITER_SECRET_ACCESS_KEY", ""),
+        }
     client = boto3.client(
         "s3",
         endpoint_url=settings.s3_endpoint_url,
         region_name=settings.s3_region,
+        **keys,
         config=Config(s3={"addressing_style": "path" if settings.s3_endpoint_url else "auto"}),
     )
     yield client
