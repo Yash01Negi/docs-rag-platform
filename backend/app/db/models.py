@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for documents, chunks and ingestion jobs.
+"""SQLAlchemy ORM models for documents, chunks, ingestion jobs and conversations.
 
 The schema itself is owned by Alembic (``alembic/versions/``); these models mirror it for
 queries. ``tests/test_schema.py`` checks that the two stay in sync.
@@ -11,8 +11,10 @@ from enum import StrEnum
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -64,6 +66,34 @@ class FileType(StrEnum):
     PDF = "pdf"
     MARKDOWN = "markdown"
     TEXT = "text"
+
+
+class MessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class MessageStatus(StrEnum):
+    """State of a message. User messages are always ``complete``.
+
+    An assistant message is ``streaming`` while its answer is generated, then ``complete``,
+    ``failed`` (provider or server error) or ``cancelled`` (the client disconnected or
+    stopped it). Failed and cancelled answers keep the text generated before the stop.
+    """
+
+    COMPLETE = "complete"
+    STREAMING = "streaming"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class Grounding(StrEnum):
+    """How an assistant answer relates to the documents."""
+
+    GROUNDED = "grounded"  # at least one valid citation to a retrieved passage
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"  # the model said the documents do not say
+    NO_SOURCES = "no_sources"  # retrieval found nothing; the model was not called
+    UNCITED = "uncited"  # an answer without any valid citation
 
 
 class Language(StrEnum):
@@ -221,4 +251,157 @@ class IngestionJob(Base):
             postgresql_where=text("status = 'processing'"),
         ),
         Index("ix_ingestion_jobs_document_created", "document_id", "created_at"),
+    )
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    title: Mapped[str] = mapped_column(String(200))
+    # True until someone renames the conversation; the first question then becomes the title.
+    title_is_default: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("length(btrim(title)) > 0", name="ck_conversations_title_not_empty"),
+        Index("ix_conversations_updated_at_id", "updated_at", "id"),
+    )
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    # 1, 2, 3, ... within the conversation: the display and prompt order.
+    sequence: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text, server_default="")
+    status: Mapped[str] = mapped_column(String(16))
+    # Idempotency key chosen by the client for a question; a retry with the same key never
+    # creates a second question.
+    client_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # The question an assistant message answers.
+    reply_to_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE")
+    )
+    grounding: Mapped[str | None] = mapped_column(String(32))
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    # Generation metadata (assistant messages). ``requested_provider``/``requested_model``
+    # are what the question asked for (the selection, or the default) and are always set;
+    # ``provider``/``model`` are what was called (unset when no model was called, e.g. no
+    # passage matched); ``served_model`` is the model that answered (it differs from
+    # ``model`` after a Claude server-side fallback).
+    requested_provider: Mapped[str | None] = mapped_column(String(32))
+    requested_model: Mapped[str | None] = mapped_column(String(128))
+    provider: Mapped[str | None] = mapped_column(String(32))
+    model: Mapped[str | None] = mapped_column(String(128))
+    served_model: Mapped[str | None] = mapped_column(String(128))
+    stop_reason: Mapped[str | None] = mapped_column(String(32))
+    provider_request_id: Mapped[str | None] = mapped_column(String(128))
+    input_tokens: Mapped[int | None] = mapped_column(Integer)
+    output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_read_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    cache_creation_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    retrieval_mode: Mapped[str | None] = mapped_column(String(16))
+    retrieval_ms: Mapped[float | None] = mapped_column(Float)
+    first_token_ms: Mapped[float | None] = mapped_column(Float)
+    total_ms: Mapped[float | None] = mapped_column(Float)
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("conversation_id", "sequence", name="uq_messages_conversation_sequence"),
+        CheckConstraint("sequence >= 1", name="ck_messages_sequence"),
+        CheckConstraint(_in("role", MessageRole), name="ck_messages_role"),
+        CheckConstraint(_in("status", MessageStatus), name="ck_messages_status"),
+        CheckConstraint(
+            f"grounding IS NULL OR {_in('grounding', Grounding)}", name="ck_messages_grounding"
+        ),
+        CheckConstraint(
+            "role <> 'user' OR (status = 'complete' AND reply_to_id IS NULL "
+            "AND length(content) > 0)",
+            name="ck_messages_user_shape",
+        ),
+        CheckConstraint(
+            "role <> 'assistant' OR (reply_to_id IS NOT NULL AND client_message_id IS NULL)",
+            name="ck_messages_assistant_shape",
+        ),
+        CheckConstraint(
+            "(input_tokens IS NULL OR input_tokens >= 0) AND "
+            "(output_tokens IS NULL OR output_tokens >= 0)",
+            name="ck_messages_tokens",
+        ),
+        Index(
+            "uq_messages_client_message_id",
+            "conversation_id",
+            "client_message_id",
+            unique=True,
+            postgresql_where=text("client_message_id IS NOT NULL"),
+        ),
+        # One answer per question, and one answer being generated per conversation.
+        Index(
+            "uq_messages_reply_to",
+            "reply_to_id",
+            unique=True,
+            postgresql_where=text("reply_to_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_messages_one_streaming_per_conversation",
+            "conversation_id",
+            unique=True,
+            postgresql_where=text("status = 'streaming'"),
+        ),
+    )
+
+
+class MessageCitation(Base):
+    """A retrieved passage given to the model for an answer.
+
+    ``supporting`` is true when the answer cites the passage, false when it was only
+    provided as context. The chunk and document IDs are kept without foreign keys so the
+    record survives a reindex (which replaces chunk IDs) or a document deletion; the other
+    columns are a snapshot of the passage's location at answer time.
+    """
+
+    __tablename__ = "message_citations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE")
+    )
+    # The N in the [S<N>] marker used in the answer text.
+    source_index: Mapped[int] = mapped_column(Integer)
+    supporting: Mapped[bool] = mapped_column(Boolean)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    filename: Mapped[str] = mapped_column(String(255))
+    chunk_ordinal: Mapped[int] = mapped_column(Integer)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
+    section: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(String(16))
+    retrieval_rank: Mapped[int] = mapped_column(Integer)
+    score: Mapped[float] = mapped_column(Float)
+    score_type: Mapped[str] = mapped_column(String(32))
+    # SHA-256 of the chunk text, to find the same passage again after a reindex.
+    chunk_text_sha256: Mapped[str] = mapped_column(String(64))
+    excerpt: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("message_id", "source_index", name="uq_message_citations_source"),
+        CheckConstraint("source_index >= 1", name="ck_message_citations_source_index"),
+        CheckConstraint("chunk_ordinal >= 0", name="ck_message_citations_ordinal"),
+        CheckConstraint(
+            "chunk_text_sha256 ~ '^[0-9a-f]{64}$'", name="ck_message_citations_sha256_hex"
+        ),
+        Index("ix_message_citations_chunk_id", "chunk_id"),
+        Index("ix_message_citations_document_id", "document_id"),
     )

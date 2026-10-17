@@ -2,7 +2,8 @@
 
 How YashRAG's search quality and latency are measured, and the results that the Phase 3
 decisions ([ADR 0005](../decisions/0005-bilingual-keyword-search.md),
-[ADR 0006](../decisions/0006-hybrid-retrieval.md)) rest on.
+[ADR 0006](../decisions/0006-hybrid-retrieval.md)) rest on. Answer evaluation (Phase 4) is in
+[chat.md](chat.md).
 
 ## Files in this folder
 
@@ -13,6 +14,7 @@ decisions ([ADR 0005](../decisions/0005-bilingual-keyword-search.md),
 | [ann-benchmark-github-actions.md](ann-benchmark-github-actions.md) | Exact vs HNSW vector search, two runs on GitHub Actions (up to 100,000 rows) |
 | [ann-benchmark-sandbox.md](ann-benchmark-sandbox.md) / [.json](ann-benchmark-sandbox.json) | The same benchmark in the development sandbox (up to 200,000 rows) |
 | [keyword-benchmark-sandbox.md](keyword-benchmark-sandbox.md) | Keyword (BM25) latency as the corpus grows to 100,000 chunks |
+| [chat.md](chat.md) | Answer evaluation: the 26-question set, metrics, how to run it, and results (extractive baseline only so far) |
 
 ## The evaluation set
 

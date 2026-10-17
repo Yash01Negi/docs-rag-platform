@@ -8,18 +8,24 @@ English documents, ask questions in either language, and get answers grounded in
 documents with citations, backed by an evaluation suite that measures retrieval and answer
 quality.
 
-> **Status: Phase 3 (Retrieval) is implemented.** You can upload Japanese, English and
-> mixed PDF, Markdown and text files, and search them by meaning (semantic search with a
-> locally run BAAI/bge-m3), by words and phrases (BM25 keyword search with Japanese
-> morphological analysis), or both (hybrid search with Reciprocal Rank Fusion), from the API
-> or the Search page. **There is no chat or answer generation yet:** search returns stored
-> passages only.
+> **Status: Phase 4.1 (multi-model chat) is implemented.** You can upload Japanese, English
+> and mixed PDF, Markdown and text files, search them (semantic, keyword or hybrid), and ask
+> questions on the Chat page: answers stream in from the model you pick (Anthropic Claude,
+> Google Gemini, or a local model through Ollama), grounded in retrieved passages, with
+> citations that open the document at the cited passage. Conversations are stored and can
+> be continued, renamed and deleted, and the model can change between questions.
 >
-> **Measured, not assumed:** a judged bilingual evaluation set (51 queries) was run with the
-> real model on GitHub Actions. Semantic search scored best (nDCG@10 0.927, hybrid 0.874,
-> keyword 0.802) and is the default mode. See [docs/evaluation/](docs/evaluation/README.md)
-> and [ADR 0006](docs/decisions/0006-hybrid-retrieval.md). BGE-M3 has been run on CPU only
-> (GitHub Actions), not on Apple Silicon (MPS) or inside the Docker containers.
+> **Measured, not assumed:** retrieval was evaluated with the real model on 51 judged
+> queries (semantic nDCG@10 0.927, the default; [docs/evaluation/](docs/evaluation/README.md)).
+> For answers, a 26-question judged set and harness exist, and with real BGE-M3 retrieval
+> every question's evidence reaches the model. **Answer quality with a real language model
+> has not been measured yet**: no API keys or Ollama server were available, so all three
+> providers are verified only with mocked HTTP transports, never against the real services
+> ([docs/llm-providers.md](docs/llm-providers.md#verification-status),
+> [docs/evaluation/chat.md](docs/evaluation/chat.md)).
+>
+> **No authentication:** anyone who can reach the server can read every document and every
+> conversation. Run it on a trusted network only.
 
 ## Implementation status
 
@@ -51,8 +57,16 @@ quality.
 | Retrieval evaluation (51 judged EN/JA/mixed queries; Recall, Precision, MRR, nDCG, latency) | ✅ Implemented and run with the real model |
 | Approximate nearest-neighbour (HNSW) index | ⏸️ Not needed yet: exact search measured and chosen ([ADR 0006](docs/decisions/0006-hybrid-retrieval.md)) |
 | Reranking model | ⏸️ Not added: no measured need yet ([ADR 0006](docs/decisions/0006-hybrid-retrieval.md)) |
-| Chat with grounded answers and citations | 🕒 Planned |
-| Answer-quality evaluation | 🕒 Planned |
+| LLM provider interface; Anthropic Claude via the official SDK (streaming, timeouts, retries, error mapping) | ✅ Implemented (contract-tested with a mocked transport; no real API call verified) |
+| Google Gemini (official Google Gen AI SDK) and Ollama (HTTP API) providers | ✅ Implemented (contract-tested with mocked transports; no real request verified) |
+| Provider registry, model catalog (`GET /chat/models`) and per-question model choice, validated on the server, with no cross-provider fallback | ✅ Implemented |
+| Model selector on the Chat page (cost class, availability, reasons, remembered per browser session) | ✅ Implemented |
+| Conversations API: create, list, read, rename, delete, continue | ✅ Implemented |
+| Streamed answers over Server-Sent Events, with stop, retry and idempotent resend | ✅ Implemented |
+| Grounded answers: numbered sources, token-budgeted context, follow-up retrieval, abstention | ✅ Implemented |
+| Citations checked against retrieved chunks, stored, and relocated after reindexing | ✅ Implemented |
+| Chat page (history sidebar, streaming, citations, expandable sources, document links) | ✅ Implemented |
+| Answer evaluation (26 judged EN/JA/cross-language questions; lexical metrics) | ✅ Implemented; run with a non-LLM baseline only |
 | Authentication | 🕒 Planned |
 | AWS deployment | 🕒 Planned |
 
@@ -64,7 +78,8 @@ quality.
 | Embeddings (worker and API) | BAAI/bge-m3 via sentence-transformers and PyTorch (CPU, or Apple MPS on the host) |
 | Keyword search | SudachiPy + sudachidict-core (Japanese), snowballstemmer (English), PostgreSQL `tsvector` + GIN, BM25 in SQL |
 | Database | PostgreSQL 17, pgvector 0.8.1, SQLAlchemy 2 (async), psycopg 3, Alembic |
-| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, React Router |
+| Answer generation | Anthropic Claude (official `anthropic` SDK), Google Gemini (official `google-genai` SDK) and local models through Ollama's HTTP API; Claude (`claude-opus-5-5`) is the default |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, React Router, react-markdown |
 | Tooling | uv (locked Python dependencies), Ruff (lint + format), pytest, oxlint, Vitest, Docker Compose, GitHub Actions |
 
 ## Architecture overview
@@ -76,17 +91,19 @@ flowchart LR
     be --> db[("PostgreSQL<br/>+ pgvector + tsvector")]
     cache2[("model cache<br/>volume")] --> be
     be -- "store original" --> files[("uploads<br/>volume")]
+    be -- "stream answers" --> llm(["Anthropic API · Gemini API<br/>or Ollama (local)"])
     worker["Ingestion worker<br/>extract · chunk · BGE-M3"] -- "claim jobs · write chunks" --> db
     files --> worker
     cache[("model cache<br/>volume")] --> worker
     mig["Alembic<br/>migrations"] --> db
 ```
 
-- The **frontend** has a Documents area (upload, library, details), a Search page and a
-  dashboard with live backend status. Chat and Evaluation are labelled placeholders.
+- The **frontend** has a Documents area (upload, library, details), a Search page, a Chat
+  page and a dashboard with live backend status. Evaluation is a labelled placeholder.
 - The **API** validates and stores uploads, queues ingestion jobs in PostgreSQL, serves
-  document data, and runs search. It loads BGE-M3 once to embed search queries, on a
-  dedicated thread.
+  document data, runs search, and answers questions: it retrieves passages, streams a
+  cited answer from the language model over Server-Sent Events, and stores conversations.
+  It loads BGE-M3 once to embed search queries, on a dedicated thread.
 - The **worker** is a separate process that claims jobs, extracts text, chunks it, embeds it
   with BAAI/bge-m3 and writes chunks and vectors in one transaction.
 - The **database** is PostgreSQL with pgvector
@@ -96,6 +113,10 @@ flowchart LR
 More detail: [docs/architecture.md](docs/architecture.md) ·
 [docs/ingestion-pipeline.md](docs/ingestion-pipeline.md) ·
 [docs/retrieval.md](docs/retrieval.md) ·
+[docs/chat.md](docs/chat.md) ·
+[docs/chat-api.md](docs/chat-api.md) ·
+[docs/llm-providers.md](docs/llm-providers.md) ·
+[docs/llm-smoke-tests.md](docs/llm-smoke-tests.md) ·
 [docs/evaluation/](docs/evaluation/README.md) ·
 Decisions: [docs/decisions/](docs/decisions/)
 
@@ -212,6 +233,32 @@ Both processes must see the same uploaded files, which they do with the default
 worker.) The worker's `embedding_model_loaded` log line shows which device it picked. MPS
 support depends on your PyTorch build, and no performance figures are claimed here.
 
+### Choosing language models
+
+Chat needs at least one provider. Configure any combination in `.env`, then restart the API;
+the Chat page's model selector lists each model with its cost class and whether it can be
+used. Details, limits and data handling: [docs/llm-providers.md](docs/llm-providers.md).
+
+| Provider | Cost | Set | Notes |
+| --- | --- | --- | --- |
+| Anthropic Claude | Paid per token | `ANTHROPIC_API_KEY` | The Phase 4 default. Key from the Anthropic Console |
+| Google Gemini | Free tier or paid | `GEMINI_API_KEY` (and `GEMINI_TIER`) | Key from [Google AI Studio](https://aistudio.google.com/app/apikey). **On the free tier Google may use prompts and document passages to improve its products, and rate limits are low**; do not use it for confidential documents ([details](docs/llm-providers.md#free-tier-limits-and-data-handling)) |
+| Ollama | Local, free | `OLLAMA_MODELS` (and `OLLAMA_BASE_URL` outside Docker) | Install from <https://ollama.com/download>, then `ollama pull qwen3:8b`. Prompts stay on your machine; answers are slower ([macOS setup](docs/llm-providers.md#installing-ollama-on-macos)) |
+
+For example, a setup that costs nothing per question, with the stack in Docker Desktop on a
+Mac and Ollama running as the Mac app:
+
+```bash
+# .env
+LLM_PROVIDER=ollama
+OLLAMA_MODELS=qwen3:8b          # after `ollama pull qwen3:8b`
+# OLLAMA_BASE_URL defaults to http://host.docker.internal:11434 in Compose;
+# use http://localhost:11434 when the API runs directly on the Mac (Option B).
+```
+
+`LLM_PROVIDER` / `LLM_MODEL` only choose the default. The server accepts only models it
+lists, and it never switches to another provider or model when the chosen one fails.
+
 ### Configuration
 
 All configuration is read from environment variables (or `.env`). See
@@ -254,6 +301,18 @@ All configuration is read from environment variables (or `.env`). See
 | `SEARCH_PRELOAD_MODEL` | no | Load the model when the API starts. Default `false`; Compose uses `true`. |
 | `SEARCH_MODEL_LOAD_WAIT_SECONDS` | no | How long a search waits for a model load in progress. Default `20`. |
 | `BACKEND_MEMORY` / `BACKEND_TORCH_THREADS` | Compose only | API container memory limit and PyTorch threads. Defaults `4g` / `2`. |
+| `LLM_PROVIDER` / `LLM_MODEL` | no | Default model for questions that name none: `anthropic` and, when `LLM_MODEL` is unset, the first model of that provider's list. |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODELS` | for Claude | Server-side key (never commit it) and the Claude models offered. Without any provider configured the API starts and chat answers `503 llm_not_configured`. |
+| `GEMINI_API_KEY` / `GEMINI_MODELS` / `GEMINI_TIER` / `GEMINI_THINKING_LEVEL` | for Gemini | Server-side key, models offered (Flash and Flash-Lite by default), `free` or `paid`, thinking level (unset). |
+| `OLLAMA_BASE_URL` / `OLLAMA_MODELS` | for Ollama | Ollama server (Compose default `http://host.docker.internal:11434`) and the allowlist of local models; Ollama is off while `OLLAMA_MODELS` is empty. |
+| `OLLAMA_NUM_CTX` / `OLLAMA_THINK` / `OLLAMA_KEEP_ALIVE` / `OLLAMA_ALLOW_REMOTE_MODELS` | no | Context window (`16384`), think option, keep-alive (unset), allow Ollama cloud models (`false`). |
+| `LLM_CATALOG_TTL_SECONDS` / `LLM_CATALOG_CHECK_TIMEOUT_SECONDS` | no | How long a model availability check is reused (`300`) and its timeout (`5`). |
+| `LLM_MAX_OUTPUT_TOKENS` / `LLM_EFFORT` / `LLM_TEMPERATURE` / `LLM_FALLBACKS` | no | Output limit (`2048`), Claude effort (unset), temperature (unset; current Claude models reject it), Claude server-side fallback (`default`). |
+| `LLM_CONNECT_TIMEOUT_SECONDS` / `LLM_READ_TIMEOUT_SECONDS` / `LLM_REQUEST_TIMEOUT_SECONDS` / `LLM_MAX_RETRIES` | no | `10` / `60` / `180` / `2`. See [docs/llm-providers.md](docs/llm-providers.md). |
+| `CHAT_RETRIEVAL_MODE` / `CHAT_RETRIEVAL_TOP_K` / `CHAT_MIN_SIMILARITY` | no | Retrieval for answers: mode (default `SEARCH_DEFAULT_MODE`), passages (`8`), similarity floor (unset). |
+| `CHAT_CONTEXT_TOKEN_BUDGET` / `CHAT_HISTORY_TOKEN_BUDGET` / `CHAT_HISTORY_MAX_MESSAGES` | no | Prompt budgets: `8000` / `3000` estimated tokens, `10` messages. |
+| `CHAT_MAX_QUESTION_CHARS` / `CHAT_MAX_CONCURRENT_GENERATIONS` | no | `4000` characters; `4` answers at once per API process. |
+| `CHAT_FOLLOWUP_MAX_CHARS` / `CHAT_CITATION_EXCERPT_CHARS` / `CHAT_HEARTBEAT_SECONDS` / `CHAT_MAX_TITLE_CHARS` | no | `60` / `600` / `15` / `200`. See [docs/chat.md](docs/chat.md). |
 
 ## Testing
 
@@ -292,6 +351,17 @@ uv sync --extra embeddings
 RUN_MODEL_TESTS=1 uv run --extra embeddings pytest -m model
 ```
 
+#### Real language model smoke tests
+
+`tests/test_llm_live_smoke.py` sends a few short real requests to each configured provider
+(availability, one streamed answer with usage, stopping a stream). It is skipped unless
+`RUN_LLM_SMOKE_TESTS=1`, never runs in CI, and costs money for paid providers. See
+[docs/llm-smoke-tests.md](docs/llm-smoke-tests.md):
+
+```bash
+RUN_LLM_SMOKE_TESTS=1 GEMINI_API_KEY=… uv run pytest -m live_llm -s
+```
+
 #### Retrieval evaluation
 
 `backend/evaluation/` holds a judged evaluation set (13 documents, 51 English, Japanese and
@@ -308,6 +378,22 @@ DATABASE_URL=postgresql+psycopg://…/yashrag_eval uv run --extra embeddings pyt
 DATABASE_URL=postgresql+psycopg://…/yashrag_eval ENVIRONMENT=test EMBEDDING_PROVIDER=fake \
   uv run python -m evaluation.run --reset --modes keyword
 ```
+
+#### Answer evaluation
+
+`python -m evaluation.chat_eval` runs 26 judged questions through the real chat pipeline
+and reports evidence recall, fact recall, citation precision and coverage, abstention,
+answer language, latency and tokens. Without an API key it uses an extractive baseline (no
+language model) and says so in its report; `--provider configured` uses the configured
+model. See [docs/evaluation/chat.md](docs/evaluation/chat.md).
+
+```bash
+DATABASE_URL=postgresql+psycopg://…/yashrag_eval ENVIRONMENT=test EMBEDDING_PROVIDER=fake \
+  uv run python -m evaluation.chat_eval --reset --provider extractive --mode keyword
+```
+
+Tests never call a real language model: they use a scripted test double and contract tests
+that drive the real `anthropic` SDK against a mocked HTTP transport.
 
 Benchmarks: `python -m evaluation.ann_benchmark` (exact vs HNSW vector search) and
 `python -m evaluation.keyword_benchmark` (keyword latency vs corpus size). Results and how
@@ -327,7 +413,20 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 
 ## Current limitations
 
-- **No chat, answer generation or citations yet.** Search returns stored passages only.
+- **Real-model answers are unverified.** No Anthropic or Gemini API key and no Ollama
+  server were available, so no answer from a real model has been generated or evaluated,
+  and answer quality will differ between models; see
+  [docs/evaluation/chat.md](docs/evaluation/chat.md). Answers can be wrong even when cited:
+  the server checks that every citation points at a retrieved passage, not that the passage
+  supports the sentence.
+- **Chat has no per-client rate limit** (there are no users to tell apart) and every
+  question to a paid model costs tokens. Anyone who can reach the server can use any
+  configured model, including paid ones.
+- **Gemini's free tier** has low rate limits and lets Google use submitted content, which
+  includes passages from your documents
+  ([details](docs/llm-providers.md#free-tier-limits-and-data-handling)). Limits are per conversation (one answer at a time) and per
+  API process (`CHAT_MAX_CONCURRENT_GENERATIONS`). See
+  [docs/chat.md](docs/chat.md#security-and-limitations).
 - **Semantic search is exact.** Latency grows linearly with the number of chunks (about
   50 ms at 10,000 and 620 to 670 ms at 100,000 on 4 vCPUs); an HNSW index is the planned
   next step past roughly 17,000 chunks ([ADR 0006](docs/decisions/0006-hybrid-retrieval.md)).
@@ -341,8 +440,10 @@ every pull request, plus `alembic check` and Docker Compose config validation.
   hold a copy of the model in memory (about 2.3 GB each).
 - No OCR: scanned PDFs fail with `no_extractable_text`. Only PDF, Markdown and plain text.
 - Dense vectors only; no sparse or multi-vector (ColBERT) retrieval.
-- No authentication or authorization, and therefore no per-user documents: anyone who can
-  reach the API can upload, read and delete every document, and deduplication is global.
+- No authentication or authorization, and therefore no per-user documents or conversations:
+  anyone who can reach the API can upload, read and delete every document, and read,
+  rename and delete every conversation. Conversations are not private between people, and
+  deduplication is global.
   Do not expose the stack to the public internet.
 - Original files are stored on local disk (a Docker volume) with no backups. The storage
   interface is ready for object storage, but no S3 implementation exists.
@@ -364,9 +465,10 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 | --- | --- | --- |
 | 1. Foundation | Monorepo, FastAPI, PostgreSQL + pgvector, migrations, app shell, Docker, CI | ✅ Done |
 | 2. Ingestion | Document upload, JA/EN parsing and chunking, local BGE-M3 embeddings, worker, Documents UI | ✅ Done |
-| 3. Retrieval | Semantic, bilingual keyword and hybrid search, search API and UI, retrieval evaluation | ✅ Implemented |
-| 4. Chat | Grounded answer generation with citations, chat UI | 🕒 Next |
-| 5. Evaluation | Answer-quality metrics, evaluation UI (retrieval metrics exist since Phase 3) | 🕒 Planned |
+| 3. Retrieval | Semantic, bilingual keyword and hybrid search, search API and UI, retrieval evaluation | ✅ Done |
+| 4. Chat | Grounded, streamed answers with citations, conversations, chat UI, answer evaluation harness | ✅ Implemented (real-model run pending an API key) |
+| 4.1 Multi-model | Gemini and Ollama providers, model catalog, per-question model selector | ✅ Implemented (real-provider runs pending keys and an Ollama server) |
+| 5. Evaluation | Evaluation UI, model-based or human answer review (lexical answer metrics exist since Phase 4) | 🕒 Planned |
 | 6. Deployment | Production images, AWS infrastructure, monitoring | 🕒 Planned |
 
 ## License

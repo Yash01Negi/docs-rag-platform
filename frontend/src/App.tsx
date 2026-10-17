@@ -18,6 +18,7 @@ export default function App() {
         <Route path="documents/:documentId" element={<DocumentDetailPage />} />
         <Route path="search" element={<SearchPage />} />
         <Route path="chat" element={<ChatPage />} />
+        <Route path="chat/:conversationId" element={<ChatPage />} />
         <Route path="evaluation" element={<EvaluationPage />} />
         <Route path="*" element={<NotFoundPage />} />
       </Route>
