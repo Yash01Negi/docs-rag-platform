@@ -82,8 +82,11 @@ def empty_database_url(database_url: str) -> Iterator[str]:
         admin.dispose()
 
 
-# Tables cleared before each test that uses ``clean_database`` (migrations 0002 and 0004).
+# Tables cleared before each test that uses ``clean_database`` (migrations 0002, 0004, 0006).
 _DATA_TABLES = (
+    "connector_objects",
+    "connector_sync_runs",
+    "connectors",
     "message_citations",
     "messages",
     "conversations",
