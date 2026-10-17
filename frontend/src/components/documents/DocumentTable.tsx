@@ -7,6 +7,18 @@ import DocumentStatusBadge from './DocumentStatusBadge'
 const linkClass =
   'font-medium text-slate-900 hover:text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 rounded-sm break-all'
 
+function SourceTag({ document }: { document: DocumentSummary }) {
+  if (document.source_type !== 's3') return null
+  return (
+    <span
+      className="ml-2 rounded bg-amber-50 px-1.5 py-0.5 align-middle text-[11px] font-semibold text-amber-800 ring-1 ring-amber-200 ring-inset"
+      title="Imported from Amazon S3 by a connector"
+    >
+      S3
+    </span>
+  )
+}
+
 function ErrorSummary({ document }: { document: DocumentSummary }) {
   if (!document.error_message) return null
   return (
@@ -55,6 +67,7 @@ export default function DocumentTable({ documents }: { documents: DocumentSummar
                   <Link to={`/documents/${document.id}`} className={linkClass}>
                     {document.filename}
                   </Link>
+                  <SourceTag document={document} />
                   <ErrorSummary document={document} />
                 </td>
                 <td className="px-4 py-3 text-slate-600">{FILE_TYPE_LABELS[document.file_type]}</td>
@@ -91,6 +104,7 @@ export default function DocumentTable({ documents }: { documents: DocumentSummar
             <p className="mt-1 text-xs text-slate-500">
               {FILE_TYPE_LABELS[document.file_type]} · {formatBytes(document.size_bytes)} ·{' '}
               {languageLabel(document.language)} · {pluralize(document.chunk_count, 'chunk')}
+              {document.source_type === 's3' && ' · from S3'}
             </p>
             <p className="mt-0.5 text-xs text-slate-500">{formatDateTime(document.created_at)}</p>
             <ErrorSummary document={document} />

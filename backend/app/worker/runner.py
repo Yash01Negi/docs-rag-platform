@@ -1,6 +1,8 @@
 """The ingestion worker: claims jobs from PostgreSQL and builds document indexes.
 
-One process runs up to ``WORKER_CONCURRENCY`` jobs at a time. CPU-bound work (extraction,
+One process runs up to ``WORKER_CONCURRENCY`` jobs at a time, plus up to
+``CONNECTOR_SYNC_CONCURRENCY`` connector syncs (``app/connectors``); every poll also queues
+the scheduled syncs that are due. CPU-bound work (extraction,
 chunking, embedding) runs in a thread so the event loop keeps renewing leases. Workers are
 stateless apart from the loaded model: any number can run, and any of them can be killed
 and restarted. A job whose worker disappears is recovered when its lease expires.
@@ -18,6 +20,10 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.connectors import runs
+from app.connectors.errors import ConnectorError, ConnectorErrorCode
+from app.connectors.s3 import ObjectStore, S3ObjectStore
+from app.connectors.sync import SyncEngine
 from app.core.config import Settings
 from app.core.logging import request_id_var
 from app.db.models import Document, FileType
@@ -48,6 +54,7 @@ class Worker:
         provider: EmbeddingProvider,
         storage: DocumentStorage,
         worker_id: str | None = None,
+        object_store: ObjectStore | None = None,
     ) -> None:
         self.settings = settings
         self.sessions: async_sessionmaker[AsyncSession] = create_session_factory(engine)
@@ -61,6 +68,9 @@ class Worker:
         )
         self._stopping = asyncio.Event()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._sync_tasks: set[asyncio.Task[None]] = set()
+        # Created on the first sync, so workers without connectors never build an S3 client.
+        self._object_store = object_store
 
     def stop(self) -> None:
         """Stop claiming new jobs; in-flight jobs are given a grace period to finish."""
@@ -116,6 +126,8 @@ class Worker:
                 task = asyncio.create_task(self.process(claimed))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
+            if await self.sync_once():
+                claimed_any = True
             return claimed_any
         except Exception:
             # Database outages must not kill the worker; it retries on the next poll.
@@ -126,17 +138,49 @@ class Worker:
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(self._stopping.wait(), timeout=seconds)
 
+    async def sync_once(self) -> bool:
+        """Queue due scheduled syncs, recover lost ones and fill free sync slots. Returns
+        True if a sync was claimed."""
+        async with self.sessions() as session:
+            scheduled = await runs.schedule_due_syncs(
+                session, self.settings.connector_sync_max_attempts
+            )
+        if scheduled:
+            logger.info("syncs_scheduled", extra={"count": scheduled})
+        async with self.sessions() as session:
+            recovered = await runs.recover_expired_runs(
+                session, self.settings.connector_sync_retry_backoff_seconds
+            )
+        if recovered:
+            logger.info("syncs_recovered", extra={"count": recovered})
+        claimed_any = False
+        while len(self._sync_tasks) < self.settings.connector_sync_concurrency:
+            if self._stopping.is_set():
+                break
+            async with self.sessions() as session:
+                claimed = await runs.claim_next_run(
+                    session, self.worker_id, self.settings.worker_lease_seconds
+                )
+            if claimed is None:
+                break
+            claimed_any = True
+            task = asyncio.create_task(self.process_sync(claimed))
+            self._sync_tasks.add(task)
+            task.add_done_callback(self._sync_tasks.discard)
+        return claimed_any
+
     async def wait_idle(self) -> None:
-        """Wait until all in-flight jobs have finished (used by tests)."""
-        while self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        """Wait until all in-flight jobs and syncs have finished (used by tests)."""
+        while self._tasks or self._sync_tasks:
+            await asyncio.gather(*list(self._tasks | self._sync_tasks), return_exceptions=True)
 
     async def _drain(self) -> None:
-        if not self._tasks:
+        in_flight = self._tasks | self._sync_tasks
+        if not in_flight:
             return
-        logger.info("worker_draining", extra={"in_flight": len(self._tasks)})
+        logger.info("worker_draining", extra={"in_flight": len(in_flight)})
         _, pending = await asyncio.wait(
-            set(self._tasks), timeout=self.settings.worker_shutdown_grace_seconds
+            set(in_flight), timeout=self.settings.worker_shutdown_grace_seconds
         )
         for task in pending:
             task.cancel()
@@ -250,6 +294,94 @@ class Worker:
                 continue
             if not held:
                 logger.warning("lease_lost_during_processing", extra={"job_id": str(job.id)})
+                return
+
+    # -- one connector sync ----------------------------------------------------------------
+
+    async def _store(self) -> ObjectStore:
+        if self._object_store is None:
+            self._object_store = await asyncio.to_thread(S3ObjectStore.from_settings, self.settings)
+        return self._object_store
+
+    async def process_sync(self, run: runs.ClaimedRun) -> None:
+        token = request_id_var.set(run.request_id or f"sync-{run.id.hex[:12]}")
+        context = {
+            "connector_id": str(run.connector_id),
+            "run_id": str(run.id),
+            "trigger": run.trigger,
+            "attempt": run.attempt,
+        }
+        started = time.perf_counter()
+        logger.info("sync_started", extra=context)
+        heartbeat = asyncio.create_task(self._sync_heartbeat(run))
+        try:
+            engine = SyncEngine(self.settings, self.sessions, self.storage, await self._store())
+            report = await engine.run(run)
+            async with self.sessions() as session:
+                await runs.finish_run(session, run, report.status, failures=report.failures)
+            logger.info(
+                "sync_finished",
+                extra={
+                    **context,
+                    **report.as_log(),
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                },
+            )
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                async with self.sessions() as session:
+                    released = await runs.release_run(session, run)
+                logger.warning("sync_released", extra={**context, "released": released})
+            raise
+        except jobs.LeaseLostError:
+            logger.warning("sync_lease_lost", extra=context)
+        except Exception as exc:
+            error = (
+                exc
+                if isinstance(exc, ConnectorError)
+                else ConnectorError(
+                    ConnectorErrorCode.INTERNAL_ERROR,
+                    "An unexpected error occurred during the sync.",
+                    retryable=True,
+                )
+            )
+            log = logger.warning if isinstance(exc, ConnectorError) else logger.exception
+            log(
+                "sync_attempt_failed",
+                extra={
+                    **context,
+                    "error_code": error.code.value,
+                    "retryable": error.retryable,
+                    "duration_ms": round((time.perf_counter() - started) * 1000),
+                },
+            )
+            try:
+                async with self.sessions() as session:
+                    status = await runs.fail_run(
+                        session, run, error, self.settings.connector_sync_retry_backoff_seconds
+                    )
+                logger.info("sync_failure_recorded", extra={**context, "status": status.value})
+            except jobs.LeaseLostError:
+                logger.warning("sync_lease_lost", extra=context)
+            except Exception:
+                logger.exception("sync_failure_not_recorded", extra=context)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            request_id_var.reset(token)
+
+    async def _sync_heartbeat(self, run: runs.ClaimedRun) -> None:
+        while True:
+            await asyncio.sleep(self.settings.worker_heartbeat_seconds)
+            try:
+                async with self.sessions() as session:
+                    held = await runs.renew_lease(session, run, self.settings.worker_lease_seconds)
+            except Exception:
+                logger.warning("sync_lease_renewal_failed", extra={"run_id": str(run.id)})
+                continue
+            if not held:
+                logger.warning("sync_lease_lost_during_run", extra={"run_id": str(run.id)})
                 return
 
     # -- maintenance -----------------------------------------------------------------------

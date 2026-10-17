@@ -186,3 +186,123 @@ def test_conversation_tables_upgrade_and_downgrade_keep_documents(
             assert connection.scalar(text("SELECT count(*) FROM documents")) == 1
     finally:
         engine.dispose()
+
+
+_INSERT_DOCUMENT = (
+    "INSERT INTO documents (id, filename, file_type, mime_type, size_bytes, sha256, "
+    "storage_key, status{extra_columns}) VALUES (gen_random_uuid(), 'a.txt', 'text', "
+    "'text/plain', 10, repeat('c', 64), :key, 'pending'{extra_values})"
+)
+
+
+def _insert_document(connection, key: str, source_type: str | None = None) -> None:  # type: ignore[no-untyped-def]
+    sql = _INSERT_DOCUMENT.format(
+        extra_columns=", source_type" if source_type else "",
+        extra_values=", :source" if source_type else "",
+    )
+    connection.execute(text(sql), {"key": key, "source": source_type})
+
+
+def test_connector_migration_keeps_documents_and_upload_deduplication(
+    alembic_config: Config, empty_database_url: str
+) -> None:
+    command.upgrade(alembic_config, "0005")
+    engine = create_engine(empty_database_url)
+    try:
+        with engine.begin() as connection:
+            _insert_document(connection, "key-before")
+        command.upgrade(alembic_config, "0006")
+        assert {"connectors", "connector_sync_runs", "connector_objects"} <= _tables(
+            empty_database_url
+        )
+        with engine.connect() as connection:
+            # Existing documents become manual uploads.
+            assert connection.scalar(text("SELECT source_type FROM documents")) == "upload"
+        # Identical uploads are still rejected ...
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            _insert_document(connection, "key-dup")
+        # ... but an imported document may share content with an upload or another import.
+        with engine.begin() as connection:
+            _insert_document(connection, "key-s3-1", "s3")
+            _insert_document(connection, "key-s3-2", "s3")
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            _insert_document(connection, "key-bad", "dropbox")
+
+        # The downgrade refuses to run while imported documents exist ...
+        with pytest.raises(RuntimeError, match="imported documents"):
+            command.downgrade(alembic_config, "0005")
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM documents WHERE source_type = 's3'"))
+        # ... and otherwise restores the previous schema without touching uploads.
+        command.downgrade(alembic_config, "0005")
+        assert not {"connectors", "connector_sync_runs", "connector_objects"} & _tables(
+            empty_database_url
+        )
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM documents")) == 1
+        command.upgrade(alembic_config, "head")
+    finally:
+        engine.dispose()
+
+
+def test_connector_constraints(alembic_config: Config, empty_database_url: str) -> None:
+    command.upgrade(alembic_config, "head")
+    engine = create_engine(empty_database_url)
+    insert_connector = text(
+        "INSERT INTO connectors (id, name, bucket, prefix, sync_interval_minutes) "
+        "VALUES (gen_random_uuid(), :name, :bucket, :prefix, :interval) RETURNING id"
+    )
+    insert_run = text(
+        "INSERT INTO connector_sync_runs (id, connector_id, trigger, status, max_attempts) "
+        "VALUES (gen_random_uuid(), :c, 'manual', :status, 3)"
+    )
+    try:
+        with engine.begin() as connection:
+            connector = connection.scalar(
+                insert_connector, {"name": "Docs", "bucket": "docs", "prefix": "", "interval": 60}
+            )
+            connection.execute(insert_run, {"c": connector, "status": "pending"})
+            connection.execute(insert_run, {"c": connector, "status": "succeeded"})
+        bad = [
+            (insert_connector, {"name": "docs", "bucket": "other", "prefix": "", "interval": 60}),
+            (insert_connector, {"name": "Two", "bucket": "docs", "prefix": "", "interval": 60}),
+            (insert_connector, {"name": "Fast", "bucket": "b2", "prefix": "", "interval": 1}),
+            (insert_connector, {"name": " ", "bucket": "b3", "prefix": "", "interval": 60}),
+            # A second active run for the same connector.
+            (insert_run, {"c": connector, "status": "running"}),
+            (insert_run, {"c": connector, "status": "pending"}),
+        ]
+        for statement, params in bad:
+            with pytest.raises(IntegrityError), engine.begin() as connection:
+                connection.execute(statement, params)
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO connector_objects (id, connector_id, object_key, status) "
+                    "VALUES (gen_random_uuid(), :c, 'a.txt', 'active')"
+                ),
+                {"c": connector},
+            )
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO connector_objects (id, connector_id, object_key, status) "
+                    "VALUES (gen_random_uuid(), :c, 'a.txt', 'active')"
+                ),
+                {"c": connector},
+            )
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            # A deleted object must record when, and no longer point at a document.
+            connection.execute(
+                text(
+                    "INSERT INTO connector_objects (id, connector_id, object_key, status) "
+                    "VALUES (gen_random_uuid(), :c, 'b.txt', 'deleted')"
+                ),
+                {"c": connector},
+            )
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM connectors"))
+            assert connection.scalar(text("SELECT count(*) FROM connector_sync_runs")) == 0
+            assert connection.scalar(text("SELECT count(*) FROM connector_objects")) == 0
+    finally:
+        engine.dispose()

@@ -27,6 +27,8 @@ dependencies = [
     "google-genai>=2.30,<3",
     # HTTP client for the Ollama API (BSD-3-Clause); also used by the Anthropic SDK.
     "httpx2>=2.13,<3",
+    # Amazon S3 connectors (Phase 5): the official AWS SDK for Python (Apache-2.0).
+    "boto3>=1.40,<2",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +43,7 @@ dev = [
     "httpx2>=2.13,<3",  # HTTP client used by FastAPI's TestClient
     "ruff==0.17.0",
     "pypdf>=6.20,<7",  # encrypts test PDFs (BSD-3-Clause); not a runtime dependency
+    "moto[s3]>=5.1,<6",  # in-process S3 emulator for connector tests (Apache-2.0)
 ]
 
 [build-system]
@@ -84,6 +87,7 @@ markers = [
     "integration: requires a running PostgreSQL + pgvector database (set TEST_DATABASE_URL)",
     "model: downloads and runs the real BGE-M3 model (opt-in with RUN_MODEL_TESTS=1)",
     "live_llm: calls the real Anthropic, Gemini or Ollama APIs (opt-in with RUN_LLM_SMOKE_TESTS=1)",
+    "s3_smoke: calls an S3 API over HTTP, the local emulator or Amazon S3 (opt-in with RUN_S3_SMOKE_TESTS=1)",
 ]
 filterwarnings = ["error::DeprecationWarning:app.*"]
 

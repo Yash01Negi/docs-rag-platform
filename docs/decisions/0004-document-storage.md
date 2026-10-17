@@ -45,6 +45,10 @@ Use option 3.
 
 ### Deduplication
 
+> **Amended by [ADR 0011](0011-s3-sync-and-deletion.md):** since Phase 5 the unique index
+> covers uploads only (`source_type = 'upload'`); documents imported from S3 are tracked by
+> their object instead.
+
 Documents are deduplicated by the **SHA-256 of their content**, enforced by a unique index
 on `documents.sha256`. The API computes the hash while streaming the upload to a staging
 file. If a document with the same hash exists, the upload returns `200` with

@@ -22,6 +22,7 @@ from app.core.errors import ApiError
 from app.db.models import (
     Chunk,
     Document,
+    DocumentSource,
     DocumentStatus,
     IngestionJob,
     JobKind,
@@ -104,7 +105,11 @@ async def upload_document(
         except IngestionError as exc:
             raise _upload_error(exc) from exc
 
-        existing = await session.scalar(select(Document).where(Document.sha256 == sha256))
+        existing = await session.scalar(
+            select(Document).where(
+                Document.sha256 == sha256, Document.source_type == DocumentSource.UPLOAD.value
+            )
+        )
         if existing is not None:
             return UploadOutcome(existing, duplicate=True)
 
@@ -134,11 +139,15 @@ async def upload_document(
             )
             await session.commit()
         except IntegrityError:
-            # A concurrent upload of the same content won the race on uq_documents_sha256.
+            # A concurrent upload of the same content won the race on uq_documents_upload_sha256.
             await session.rollback()
             await asyncio.to_thread(storage.delete, storage_key)
             storage_key = None
-            existing = await session.scalar(select(Document).where(Document.sha256 == sha256))
+            existing = await session.scalar(
+                select(Document).where(
+                    Document.sha256 == sha256, Document.source_type == DocumentSource.UPLOAD.value
+                )
+            )
             if existing is None:
                 raise
             return UploadOutcome(existing, duplicate=True)
@@ -263,6 +272,23 @@ async def requeue_document(
     return document
 
 
+async def remove_document_rows(session: AsyncSession, document: Document) -> str:
+    """Delete a locked document row (chunks and jobs cascade) without committing.
+
+    Returns its storage key; the caller deletes the stored file after committing. Also used
+    by connector syncs when an S3 object is deleted.
+    """
+    # Answers keep their citation metadata (file name, pages) but not the deleted text.
+    await session.execute(
+        update(MessageCitation)
+        .where(MessageCitation.document_id == document.id)
+        .values(excerpt=None)
+    )
+    await session.delete(document)
+    await session.flush()
+    return document.storage_key
+
+
 async def delete_document(
     sessions: async_sessionmaker[AsyncSession], storage: DocumentStorage, document_id: uuid.UUID
 ) -> None:
@@ -276,14 +302,7 @@ async def delete_document(
         document = await session.get(Document, document_id, with_for_update=True)
         if document is None:
             raise ApiError(404, "document_not_found", "Document not found.")
-        storage_key = document.storage_key
-        # Answers keep their citation metadata (file name, pages) but not the deleted text.
-        await session.execute(
-            update(MessageCitation)
-            .where(MessageCitation.document_id == document_id)
-            .values(excerpt=None)
-        )
-        await session.delete(document)
+        storage_key = await remove_document_rows(session, document)
         await session.commit()
     try:
         await asyncio.to_thread(storage.delete, storage_key)

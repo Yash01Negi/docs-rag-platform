@@ -98,6 +98,80 @@ jobs:
       - name: Production build
         run: npm run build
 
+  s3-smoke:
+    name: S3 smoke (local S3 emulator)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg17
+        env:
+          POSTGRES_USER: yashrag
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: yashrag_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yashrag -d yashrag_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Throwaway credentials for ephemeral CI containers only. No AWS account is used:
+      # this job talks to the local S3 emulator (moto server), never to Amazon S3.
+      DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
+      TEST_DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
+      RUN_S3_SMOKE_TESTS: "1"
+      S3_SMOKE_BUCKET: yashrag-local
+      S3_ENDPOINT_URL: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ci-emulator-key
+      AWS_SECRET_ACCESS_KEY: ci-emulator-secret
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies (from uv.lock)
+        run: uv sync --locked
+
+      # The same image and seed script as the s3-local Compose profile.
+      - name: Build and start the S3 emulator
+        working-directory: .
+        run: |
+          docker build -t yashrag-s3-emulator:ci infra/s3-local
+          docker run -d --name s3-emulator -p 127.0.0.1:9000:9000 yashrag-s3-emulator:ci
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:9000/moto-api/ && break
+            sleep 1
+          done
+          docker run --rm --network host -e S3_ENDPOINT_URL -e S3_LOCAL_BUCKET=yashrag-local \
+            -v "$PWD/infra/s3-local:/setup:ro" yashrag-s3-emulator:ci python /setup/seed.py
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Smoke test (new, changed and deleted objects)
+        env:
+          S3_SMOKE_WRITE: "1"
+        run: uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
+
+      - name: Smoke test (read-only, sample documents)
+        env:
+          S3_SMOKE_PREFIX: handbook/
+        run: uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
+
+      - name: Emulator logs
+        if: failure()
+        run: docker logs s3-emulator
+
   compose:
     name: Docker Compose config
     runs-on: ubuntu-24.04
@@ -110,3 +184,7 @@ jobs:
           docker compose config --quiet
           docker compose config --services | sort | tr '\n' ' ' | tee /dev/stderr \
             | grep -q "backend db frontend migrate worker"
+          # The optional emulator profile adds only the S3 emulator and its seed job.
+          docker compose --profile s3-local config --quiet
+          docker compose --profile s3-local config --services | sort | tr '\n' ' ' | tee /dev/stderr \
+            | grep -q "backend db frontend migrate s3-emulator s3-setup worker"

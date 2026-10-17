@@ -5,7 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.db.models import DocumentStatus, FileType, JobKind, JobStatus, Language
+from app.db.models import DocumentSource, DocumentStatus, FileType, JobKind, JobStatus, Language
 
 
 class _FromAttributes(BaseModel):
@@ -20,6 +20,9 @@ class DocumentSummary(_FromAttributes):
     size_bytes: int
     language: Language | None
     status: DocumentStatus
+    source_type: DocumentSource = Field(
+        description="'upload' for manual uploads, 's3' for documents imported by a connector."
+    )
     chunk_count: int = Field(description="Chunks in the document's current (active) index.")
     created_at: datetime = Field(description="Upload time.")
     updated_at: datetime
@@ -46,6 +49,22 @@ class JobSummary(_FromAttributes):
     last_error_message: str | None
 
 
+class DocumentSourceInfo(BaseModel):
+    """Where an imported document came from (connector documents only)."""
+
+    connector_id: uuid.UUID
+    connector_name: str
+    provider: str
+    bucket: str
+    object_key: str
+    uri: str = Field(description="s3://bucket/key")
+    etag: str | None = Field(description="Opaque version token of the imported object.")
+    version_id: str | None = Field(description="S3 version ID, when the bucket is versioned.")
+    size_bytes: int | None
+    last_modified: datetime | None
+    last_synced_at: datetime | None
+
+
 class DocumentDetail(DocumentSummary):
     sha256: str
     page_count: int | None
@@ -54,6 +73,9 @@ class DocumentDetail(DocumentSummary):
     embedding_dimension: int | None
     processed_at: datetime | None = Field(description="When the active index was committed.")
     latest_job: JobSummary | None
+    source: DocumentSourceInfo | None = Field(
+        default=None, description="The S3 object behind an imported document; null for uploads."
+    )
 
 
 class DocumentList(BaseModel):

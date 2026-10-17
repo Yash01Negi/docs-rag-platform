@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models for documents, chunks, ingestion jobs and conversations.
+"""SQLAlchemy ORM models for documents, chunks, ingestion jobs, conversations and connectors.
 
 The schema itself is owned by Alembic (``alembic/versions/``); these models mirror it for
 queries. ``tests/test_schema.py`` checks that the two stay in sync.
@@ -24,7 +24,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import TSVECTOR, UUID
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.core.config import EMBEDDING_DIMENSION
@@ -66,6 +66,13 @@ class FileType(StrEnum):
     PDF = "pdf"
     MARKDOWN = "markdown"
     TEXT = "text"
+
+
+class DocumentSource(StrEnum):
+    """Where a document came from. Only manual uploads are de-duplicated by content."""
+
+    UPLOAD = "upload"
+    S3 = "s3"
 
 
 class MessageRole(StrEnum):
@@ -130,9 +137,18 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_type: Mapped[str] = mapped_column(String(16), server_default=DocumentSource.UPLOAD.value)
 
     __table_args__ = (
-        UniqueConstraint("sha256", name="uq_documents_sha256"),
+        # Identical uploads are de-duplicated. Imported documents are not: two S3 objects
+        # with the same bytes are two documents, each removed when its own object goes.
+        Index(
+            "uq_documents_upload_sha256",
+            "sha256",
+            unique=True,
+            postgresql_where=text("source_type = 'upload'"),
+        ),
+        CheckConstraint(_in("source_type", DocumentSource), name="ck_documents_source_type"),
         UniqueConstraint("storage_key", name="uq_documents_storage_key"),
         CheckConstraint(_in("status", DocumentStatus), name="ck_documents_status"),
         CheckConstraint(_in("file_type", FileType), name="ck_documents_file_type"),
@@ -404,4 +420,215 @@ class MessageCitation(Base):
         ),
         Index("ix_message_citations_chunk_id", "chunk_id"),
         Index("ix_message_citations_document_id", "document_id"),
+    )
+
+
+class ConnectorProvider(StrEnum):
+    S3 = "s3"
+
+
+class SyncTrigger(StrEnum):
+    MANUAL = "manual"
+    SCHEDULED = "scheduled"
+
+
+class SyncRunStatus(StrEnum):
+    """A sync run is a job: queued, claimed by one worker under a lease, then finished.
+
+    ``partial`` means the listing completed (so deletions were applied) but some objects
+    could not be imported; they are retried by the next run.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+ACTIVE_SYNC_STATUSES = (SyncRunStatus.PENDING.value, SyncRunStatus.RUNNING.value)
+
+
+class ConnectorObjectStatus(StrEnum):
+    ACTIVE = "active"  # imported; document_id is its document
+    FAILED = (
+        "failed"  # this version was rejected (too large, invalid); not retried until it changes
+    )
+    DELETED = "deleted"  # gone from the bucket; the document was removed
+
+
+class Connector(Base):
+    """A configured document source. Credentials are never stored: the worker uses the
+    standard AWS credential chain of its own environment."""
+
+    __tablename__ = "connectors"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    provider: Mapped[str] = mapped_column(String(16), server_default=ConnectorProvider.S3.value)
+    bucket: Mapped[str] = mapped_column(String(63))
+    prefix: Mapped[str] = mapped_column(String(512), server_default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    sync_interval_minutes: Mapped[int] = mapped_column(Integer)
+    # When the scheduler queues the next automatic sync (NULL while disabled).
+    next_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_status: Mapped[str | None] = mapped_column(String(16))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(_in("provider", ConnectorProvider), name="ck_connectors_provider"),
+        CheckConstraint("length(btrim(name)) > 0", name="ck_connectors_name_not_empty"),
+        CheckConstraint(
+            "sync_interval_minutes BETWEEN 5 AND 10080", name="ck_connectors_sync_interval"
+        ),
+        CheckConstraint(
+            f"last_sync_status IS NULL OR {_in('last_sync_status', SyncRunStatus)}",
+            name="ck_connectors_last_sync_status",
+        ),
+        CheckConstraint(
+            "enabled OR next_sync_at IS NULL", name="ck_connectors_disabled_unscheduled"
+        ),
+        Index("uq_connectors_name", text("lower(name)"), unique=True),
+        UniqueConstraint("provider", "bucket", "prefix", name="uq_connectors_source"),
+        Index(
+            "ix_connectors_due", "next_sync_at", postgresql_where=text("next_sync_at IS NOT NULL")
+        ),
+    )
+
+
+class ConnectorSyncRun(Base):
+    __tablename__ = "connector_sync_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("connectors.id", ondelete="CASCADE")
+    )
+    trigger: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(16), server_default=SyncRunStatus.PENDING.value)
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    max_attempts: Mapped[int] = mapped_column(Integer)
+    run_after: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # Lease, exactly as for ingestion jobs: the token changes on every claim and fences out
+    # a worker whose lease expired.
+    locked_by: Mapped[str | None] = mapped_column(String(128))
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    objects_scanned: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    documents_imported: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    documents_updated: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    documents_unchanged: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    documents_removed: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    objects_skipped: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    objects_failed: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    # Up to 50 {"key", "code", "message"} entries for objects that failed or were skipped.
+    failures: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB, server_default=text("'[]'::jsonb")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(_in("status", SyncRunStatus), name="ck_connector_sync_runs_status"),
+        CheckConstraint(_in("trigger", SyncTrigger), name="ck_connector_sync_runs_trigger"),
+        CheckConstraint(
+            "attempts >= 0 AND attempts <= max_attempts", name="ck_connector_sync_runs_attempts"
+        ),
+        CheckConstraint("max_attempts >= 1", name="ck_connector_sync_runs_max_attempts"),
+        CheckConstraint(
+            "status <> 'running' OR (lease_token IS NOT NULL AND lease_expires_at IS NOT NULL "
+            "AND locked_by IS NOT NULL)",
+            name="ck_connector_sync_runs_running_has_lease",
+        ),
+        CheckConstraint(
+            "objects_scanned >= 0 AND documents_imported >= 0 AND documents_updated >= 0 "
+            "AND documents_unchanged >= 0 AND documents_removed >= 0 AND objects_skipped >= 0 "
+            "AND objects_failed >= 0",
+            name="ck_connector_sync_runs_counts",
+        ),
+        # At most one queued or running sync per connector, whoever asks for it (the
+        # scheduler in any worker, or the API).
+        Index(
+            "uq_connector_sync_runs_one_active",
+            "connector_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'running')"),
+        ),
+        Index(
+            "ix_connector_sync_runs_claimable",
+            "run_after",
+            "created_at",
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index(
+            "ix_connector_sync_runs_expired_leases",
+            "lease_expires_at",
+            postgresql_where=text("status = 'running'"),
+        ),
+        Index("ix_connector_sync_runs_connector_created", "connector_id", "created_at"),
+    )
+
+
+class ConnectorObject(Base):
+    """One S3 object of a connector and the document imported from it.
+
+    The row outlives the document: after a deletion it records when the object disappeared.
+    """
+
+    __tablename__ = "connector_objects"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("connectors.id", ondelete="CASCADE")
+    )
+    object_key: Mapped[str] = mapped_column(Text)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(16))
+    # The version last imported (or rejected): what the next listing is compared with.
+    etag: Mapped[str | None] = mapped_column(String(128))
+    version_id: Mapped[str | None] = mapped_column(String(1024))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    last_modified: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(String(64))
+    last_error_message: Mapped[str | None] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("connector_id", "object_key", name="uq_connector_objects_key"),
+        CheckConstraint(_in("status", ConnectorObjectStatus), name="ck_connector_objects_status"),
+        CheckConstraint("length(object_key) > 0", name="ck_connector_objects_key_not_empty"),
+        CheckConstraint(
+            "status <> 'deleted' OR (document_id IS NULL AND deleted_at IS NOT NULL)",
+            name="ck_connector_objects_deleted_shape",
+        ),
+        # A document is imported from at most one object.
+        Index(
+            "uq_connector_objects_document",
+            "document_id",
+            unique=True,
+            postgresql_where=text("document_id IS NOT NULL"),
+        ),
     )

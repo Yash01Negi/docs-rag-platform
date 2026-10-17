@@ -6,6 +6,11 @@
 #
 # Frontend: http://localhost:5173   API: http://localhost:8000/api/v1/health
 #
+# S3 connectors (Phase 5) read from Amazon S3 with the worker's AWS credentials (see
+# docs/s3-setup.md). To try them without AWS, start the optional local S3 emulator:
+#
+#   docker compose --profile s3-local up --build
+#
 # The worker and the API share BAAI/bge-m3 (about 2.3 GB) through the model-cache volume. It
 # is downloaded the first time either one loads it. To download it ahead of time (recommended,
 # so the first search does not wait for the download):
@@ -13,6 +18,18 @@
 #   docker compose run --rm worker python -m app.worker prepare-model
 
 name: yashrag
+
+# Connector settings shared by the API (validation) and the worker (S3 access). Credentials
+# are only given to the worker, below; the API never contacts S3.
+x-s3-settings: &s3-settings
+  S3_ALLOWED_SOURCES: ${S3_ALLOWED_SOURCES:-}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+  S3_REGION: ${S3_REGION:-}
+  S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-auto}
+  S3_MAX_OBJECT_BYTES: ${S3_MAX_OBJECT_BYTES:-20971520}
+  S3_MAX_OBJECTS_PER_SYNC: ${S3_MAX_OBJECTS_PER_SYNC:-10000}
+  CONNECTOR_SYNC_CONCURRENCY: ${CONNECTOR_SYNC_CONCURRENCY:-1}
+  CONNECTOR_SYNC_MAX_ATTEMPTS: ${CONNECTOR_SYNC_MAX_ATTEMPTS:-3}
 
 x-database-url: &database-url postgresql+psycopg://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}
 
@@ -57,6 +74,7 @@ services:
     # reload also reloads the embedding model, which takes a few seconds once it is cached.
     command: ["uvicorn", "app.main:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
+      <<: *s3-settings
       DATABASE_URL: *database-url
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -127,9 +145,19 @@ services:
       target: worker
     image: yashrag-worker:dev
     environment:
+      <<: *s3-settings
       DATABASE_URL: *database-url
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # AWS credentials for S3 connectors, passed through from the host environment or .env
+      # (never stored in the database). Leave them empty to use AWS_PROFILE with a mounted
+      # ~/.aws (docs/s3-setup.md) or an IAM role.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
       EMBEDDING_MODEL_NAME: ${EMBEDDING_MODEL_NAME:-BAAI/bge-m3}
       EMBEDDING_MODEL_REVISION: ${EMBEDDING_MODEL_REVISION:-5617a9f61b028005a4858fdac845db406aefb181}
       # Docker on macOS cannot use the Apple GPU (MPS), so the container runs on CPU.
@@ -179,6 +207,41 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+
+  # --- Optional S3 emulator (profile "s3-local"); not needed for Amazon S3 -------------------
+  # moto's standalone server speaks the S3 API over HTTP, so the connector code path is the
+  # same as with AWS. Point the API and worker at it with S3_ENDPOINT_URL=http://s3-emulator:9000
+  # (see docs/s3-setup.md). Local testing only: bound to 127.0.0.1, objects kept in memory
+  # (a restart empties it; s3-setup refills the samples), and it does not enforce IAM.
+  s3-emulator:
+    profiles: ["s3-local"]
+    build:
+      context: ./infra/s3-local
+    image: yashrag-s3-emulator:dev
+    ports:
+      - "127.0.0.1:${S3_LOCAL_PORT:-9000}:9000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/moto-api/')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-off job: creates the versioned sample bucket and uploads the sample documents.
+  s3-setup:
+    profiles: ["s3-local"]
+    build:
+      context: ./infra/s3-local
+    image: yashrag-s3-emulator:dev
+    command: ["python", "/setup/seed.py"]
+    environment:
+      S3_ENDPOINT_URL: http://s3-emulator:9000
+      S3_LOCAL_BUCKET: ${S3_LOCAL_BUCKET:-yashrag-local}
+    volumes:
+      - ./infra/s3-local:/setup:ro
+    depends_on:
+      s3-emulator:
+        condition: service_healthy
+    restart: "no"
 
 volumes:
   postgres-data:

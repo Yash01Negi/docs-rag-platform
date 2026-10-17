@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.connectors.sources import AllowedSource, parse_allowed_source
+
 # Repository root (docs-rag-platform/). Used so a single root-level .env file works when the
 # backend is started from either the repository root or the backend/ directory.
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -48,6 +50,8 @@ class Settings(BaseSettings):
         env_file=(_REPO_ROOT / ".env", ".env"),
         env_file_encoding="utf-8",
         extra="ignore",
+        # Startup errors must not echo values such as API keys or a URL with credentials.
+        hide_input_in_errors=True,
     )
 
     app_name: str = "YashRAG API"
@@ -99,6 +103,38 @@ class Settings(BaseSettings):
     worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0, le=600)
     worker_heartbeat_file: Path | None = None
     worker_preload_model: bool = False
+
+    # --- Connectors: Amazon S3 (Phase 5; docs/connectors.md) ---
+    # Buckets, or bucket/prefix scopes, that connectors may read, e.g.
+    # "team-docs,shared-bucket/policies/". A connector's bucket and prefix must fall inside
+    # one entry; with none configured, connectors cannot be created. This guards against
+    # importing from an unintended bucket; IAM permissions are the second layer.
+    s3_allowed_sources: Annotated[list[AllowedSource], NoDecode] = Field(default_factory=list)
+    # Server-side only, for S3-compatible test servers such as MinIO
+    # (e.g. http://minio:9000). Never accepted from API clients. Unset uses AWS.
+    s3_endpoint_url: str | None = None
+    # AWS region of the buckets; unset uses the standard AWS configuration (AWS_REGION,
+    # AWS_DEFAULT_REGION or the profile). Credentials always come from the standard chain
+    # (environment, AWS_PROFILE, container or instance IAM role) and are never stored.
+    s3_region: str | None = Field(default=None, pattern=r"^[a-z]{2}(-[a-z]+)+-\d$")
+    # "path" is needed by most S3-compatible servers; "auto" lets botocore choose.
+    s3_addressing_style: Literal["auto", "path", "virtual"] = "auto"
+    # Largest object that is downloaded; larger ones are skipped and reported.
+    s3_max_object_bytes: int = Field(default=20 * 1024 * 1024, gt=0, le=1024 * 1024 * 1024)
+    # A listing with more objects than this fails the run (nothing is deleted).
+    s3_max_objects_per_sync: int = Field(default=10000, ge=1, le=1_000_000)
+    s3_list_page_size: int = Field(default=1000, ge=1, le=1000)
+    s3_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    s3_read_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    # botocore "standard" retries per request after the first try (throttling, 5xx,
+    # connection errors).
+    s3_max_attempts: int = Field(default=3, ge=1, le=10)
+    # Sync runs per worker process at the same time (each connector has at most one).
+    connector_sync_concurrency: int = Field(default=1, ge=1, le=8)
+    # Attempts per sync run for retryable failures (listing errors, lost workers), with
+    # exponential backoff from the base delay, capped at 15 minutes.
+    connector_sync_max_attempts: int = Field(default=3, ge=1, le=10)
+    connector_sync_retry_backoff_seconds: float = Field(default=30.0, ge=0, le=900)
 
     # --- Search ---
     # Mode used when a request does not name one. Semantic scored best on the evaluation set
@@ -270,6 +306,42 @@ class Settings(BaseSettings):
                 raise ValueError(f"at most {MAX_MODELS_PER_PROVIDER} models per provider")
             return models
         return value
+
+    @field_validator("s3_allowed_sources", mode="before")
+    @classmethod
+    def _parse_s3_sources(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = [entry.strip() for entry in value.split(",") if entry.strip()]
+        if isinstance(value, list):
+            return [parse_allowed_source(entry) for entry in value]
+        return value
+
+    @field_validator("s3_endpoint_url", "s3_region", mode="before")
+    @classmethod
+    def _empty_s3_value_is_unset(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("s3_endpoint_url")
+    @classmethod
+    def _validate_s3_endpoint(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        parsed = urlsplit(value)
+        try:
+            parsed.port  # noqa: B018 - raises ValueError for an invalid port
+        except ValueError:
+            raise ValueError("S3_ENDPOINT_URL has an invalid port") from None
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("S3_ENDPOINT_URL must be an http:// or https:// URL")
+        if "@" in value or parsed.query or parsed.fragment or parsed.path not in ("", "/"):
+            raise ValueError(
+                "S3_ENDPOINT_URL must be scheme://host[:port] only, without credentials, a "
+                "path, a query or a fragment"
+            )
+        return value.rstrip("/")
 
     @field_validator(
         "llm_model",
