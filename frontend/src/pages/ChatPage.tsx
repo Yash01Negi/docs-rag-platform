@@ -3,12 +3,14 @@ import { useNavigate, useParams } from 'react-router'
 
 import AssistantMessage from '../components/chat/AssistantMessage'
 import ConversationSidebar from '../components/chat/ConversationSidebar'
+import ModelSelector from '../components/chat/ModelSelector'
 import ConfirmDialog from '../components/documents/ConfirmDialog'
 import { AlertIcon, ChatIcon } from '../components/icons'
 import { ApiError, type SearchMode } from '../lib/api'
 import {
   createConversation,
   deleteConversation,
+  fetchChatModels,
   fetchChatOptions,
   getConversation,
   listConversations,
@@ -19,8 +21,14 @@ import {
   type ChatOptions,
   type ConversationDetail,
   type ConversationSummary,
+  type ModelCatalog,
+  type ModelEntry,
 } from '../lib/chat'
 import { applyEvent, emptyAnswer, storedAnswer, type LiveTurn } from '../lib/chatState'
+import { chooseModel, loadStoredChoice, modelKey, storeChoice } from '../lib/modelSelection'
+
+// Errors that mean the model list shown is out of date.
+const MODEL_ERRORS = new Set(['model_unavailable', 'provider_not_configured', 'invalid_model'])
 
 const MODE_LABELS: Record<SearchMode, string> = {
   semantic: 'Semantic',
@@ -44,6 +52,10 @@ export default function ChatPage() {
   const { conversationId } = useParams()
   const navigate = useNavigate()
   const [options, setOptions] = useState<ChatOptions | null>(null)
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
+  const [catalogError, setCatalogError] = useState<string | null>(null)
+  const [selectedKey, setSelectedKey] = useState<string | null>(null)
+  const [refreshingModels, setRefreshingModels] = useState(false)
   const [conversations, setConversations] = useState<ConversationSummary[] | null>(null)
   const [listError, setListError] = useState<string | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
@@ -76,6 +88,25 @@ export default function ChatPage() {
     }
   }, [])
 
+  const loadModels = useCallback(async (refresh = false) => {
+    setRefreshingModels(true)
+    try {
+      const loaded = await fetchChatModels(refresh)
+      setCatalog(loaded)
+      setCatalogError(null)
+      // Keep the current choice if the server still lists it; otherwise pick one.
+      setSelectedKey((current) => {
+        if (current && loaded.models.some((m) => modelKey(m) === current)) return current
+        const chosen = chooseModel(loaded, loadStoredChoice())
+        return chosen ? modelKey(chosen) : null
+      })
+    } catch (caught) {
+      setCatalogError(caught instanceof Error ? caught.message : String(caught))
+    } finally {
+      setRefreshingModels(false)
+    }
+  }, [])
+
   const loadDetail = useCallback(async (id: string, signal?: AbortSignal) => {
     try {
       const loaded = await getConversation(id, signal)
@@ -95,10 +126,11 @@ export default function ChatPage() {
       .catch(() => !cancelled && setOptions(null))
     // oxlint-disable-next-line react/set-state-in-effect -- loads data from the API
     void refreshList()
+    void loadModels()
     return () => {
       cancelled = true
     }
-  }, [refreshList])
+  }, [refreshList, loadModels])
 
   useEffect(() => {
     if (!conversationId) return
@@ -114,6 +146,17 @@ export default function ChatPage() {
   const streaming = live !== null
   const maxChars = options?.max_question_chars ?? 4000
   const configured = options?.configured ?? true
+  const selected: ModelEntry | null =
+    catalog?.models.find((m) => selectedKey !== null && modelKey(m) === selectedKey) ?? null
+  // Without the model list (it failed to load) questions go to the server's default model.
+  const modelUsable = catalog === null || Boolean(selected?.selectable)
+  const canAsk = configured && modelUsable
+
+  function selectModel(model: ModelEntry) {
+    setSelectedKey(modelKey(model))
+    storeChoice(model)
+    setSendError(null)
+  }
 
   async function ask(question: string, clientMessageId: string) {
     setSendError(null)
@@ -140,6 +183,7 @@ export default function ChatPage() {
           content: question,
           client_message_id: clientMessageId,
           ...(mode ? { retrieval: { mode } } : {}),
+          ...(selected ? { model: { provider: selected.provider, model: selected.model } } : {}),
         },
         (event) => {
           streamStarted = true
@@ -158,6 +202,7 @@ export default function ChatPage() {
         setSendError(caught instanceof Error ? caught.message : String(caught))
         setDraft(question)
         setAnnouncement('')
+        if (caught instanceof ApiError && MODEL_ERRORS.has(caught.code)) void loadModels(true)
       } else {
         setSendError('The connection was lost while the answer was streaming.')
       }
@@ -173,7 +218,7 @@ export default function ChatPage() {
   function onSubmit(event?: FormEvent) {
     event?.preventDefault()
     const question = draft.trim()
-    if (!question || streaming || !configured) return
+    if (!question || streaming || !canAsk) return
     if (question.length > maxChars) {
       setSendError(`The question must be at most ${maxChars} characters.`)
       return
@@ -270,7 +315,8 @@ export default function ChatPage() {
           <h2 className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-900">
             {conversationId ? (detail?.title ?? ' ') : 'New chat'}
           </h2>
-          {options && (
+          {/* Without the model list, the server's default model is the one that answers. */}
+          {!catalog && options?.model && (
             <span className="hidden text-xs text-slate-500 sm:inline">
               Model: <span className="font-medium text-slate-700">{options.model}</span>
             </span>
@@ -282,8 +328,9 @@ export default function ChatPage() {
             <output className="mb-4 flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
               <AlertIcon className="mt-0.5 h-4 w-4 shrink-0" />
               <p>
-                Answer generation is not configured on the server (ANTHROPIC_API_KEY is not set). You can
-                still read and manage earlier conversations.
+                Answer generation is not configured on the server: no language model provider is set up
+                (ANTHROPIC_API_KEY, GEMINI_API_KEY, or OLLAMA_BASE_URL with OLLAMA_MODELS). You can still
+                read and manage earlier conversations.
               </p>
             </output>
           )}
@@ -334,7 +381,7 @@ export default function ChatPage() {
                         ? () => retry(message)
                         : undefined
                     }
-                    retryDisabled={streaming || !configured}
+                    retryDisabled={streaming || !canAsk}
                   />
                 )}
               </li>
@@ -366,6 +413,22 @@ export default function ChatPage() {
             </p>
           )}
           <div className="mx-auto flex max-w-3xl flex-col gap-2">
+            {catalog && configured && (
+              <ModelSelector
+                catalog={catalog}
+                selected={selected}
+                onSelect={selectModel}
+                onRefresh={() => void loadModels(true)}
+                refreshing={refreshingModels}
+                disabled={streaming}
+              />
+            )}
+            {catalogError && configured && (
+              <p className="text-xs text-slate-500">
+                The model list could not be loaded ({catalogError}); questions use the server&apos;s
+                default model{options?.model ? ` (${options.model})` : ''}.
+              </p>
+            )}
             <label htmlFor={inputId} className="sr-only">
               Your question
             </label>
@@ -411,7 +474,7 @@ export default function ChatPage() {
               ) : (
                 <button
                   type="submit"
-                  disabled={!configured || !draft.trim()}
+                  disabled={!canAsk || !draft.trim()}
                   className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:opacity-50"
                 >
                   Send

@@ -20,6 +20,8 @@ from app.llm.base import (
     TextDelta,
     Usage,
 )
+from app.llm.catalog import Availability, Cost
+from app.llm.registry import ProviderBackend
 
 ScriptItem = "str | BaseException | float | Gate"
 Script = Sequence[ScriptItem] | Callable[[GenerationRequest], Sequence[ScriptItem]]
@@ -46,11 +48,13 @@ class ScriptedProvider(LLMProvider):
         self,
         script: Script = ("A grounded answer [S1].",),
         *,
+        name: str = "test-double",
         model: str = "scripted-model",
         served_model: str | None = None,
         stop_reason: StopReason = StopReason.END,
         usage: Usage = DEFAULT_USAGE,
     ) -> None:
+        self.name = name
         self.model = model
         self.script = script
         self.served_model = served_model or model
@@ -106,3 +110,51 @@ def cite_first_source(request: GenerationRequest) -> list[str]:
         return ["[NOT_FOUND] The documents do not say."]
     text = sources[1].split("\n")[0][:200]
     return [f"The documents say: {text} [S", "1]."]
+
+
+class FakeBackend(ProviderBackend):
+    """A provider backend whose models are ScriptedProviders (one per model ID).
+
+    ``availability`` is what :meth:`check` reports; ``configured=False`` behaves like a
+    provider without credentials.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        providers: Sequence[ScriptedProvider],
+        *,
+        cost: Cost = Cost.PAID,
+        configured: bool = True,
+        availability: dict[str, Availability] | None = None,
+        label: str | None = None,
+    ) -> None:
+        super().__init__([p.model for p in providers])
+        self.name = name
+        self.label = label or name.title()
+        self._cost = cost
+        self._configured = configured
+        self.availability = availability or {}
+        self.checks = 0
+        for provider in providers:
+            provider.name = name
+            self._providers[provider.model] = provider
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
+
+    @property
+    def cost(self) -> Cost:
+        return self._cost
+
+    @property
+    def not_configured_reason(self) -> str | None:
+        return None if self._configured else f"{self.name.upper()}_API_KEY is not set"
+
+    def _create(self, model: str) -> LLMProvider:
+        raise KeyError(model)
+
+    async def check(self) -> dict[str, Availability]:
+        self.checks += 1
+        return {m: self.availability.get(m, Availability.available()) for m in self.models}

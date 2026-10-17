@@ -14,9 +14,9 @@ sequenceDiagram
     participant Chat as ChatService
     participant DB as PostgreSQL
     participant Search as SearchService (Phase 3)
-    participant LLM as LLMProvider (Anthropic)
+    participant LLM as LLMProvider (Claude, Gemini or Ollama)
     UI->>API: POST /conversations/{id}/messages
-    API->>Chat: check (404 / 409 / 429 / 503 / replay)
+    API->>Chat: check (404 / 409 / 422 / 429 / 503 / replay, model choice)
     API-->>UI: 200 text/event-stream
     Chat->>DB: Tx 1: lock conversation, store question + empty answer (streaming)
     Chat-->>UI: start
@@ -75,7 +75,8 @@ sequenceDiagram
    supporting (cited) or context (given but not cited).
 9. **Persistence.** Transaction 2 updates the answer **only if it is still `streaming`**
    (so a deleted conversation or an expired answer is not resurrected), stores status,
-   grounding, error, provider, configured and served model, stop reason, provider request
+   grounding, error, requested provider and model, the provider and model called, the served
+   model, stop reason, provider request
    ID, token usage, retrieval mode and timings, inserts one citation row per passage given
    (with `supporting`), and bumps the conversation's `updated_at`. A cancelled or failed
    answer is stored the same way with what had streamed.
@@ -140,10 +141,19 @@ section, language, rank and a link that opens the document at that passage
 Answers show their grounding (insufficient evidence, no sources, uncited), the length-limit
 note, errors with a Retry button, and the model that answered with time and tokens.
 
+A **model selector** above the composer lists every model the server offers
+(`GET /chat/models`), grouped by provider, with its cost class (Paid, Free tier, Local),
+whether it is available, and why not when it is not (no API key, not installed in Ollama,
+not offered by the provider, server unreachable). The provider's notice about cost and data
+use is shown under it. The choice applies to the next question, can change between any two
+questions of a conversation, and is remembered for the browser session (`sessionStorage`).
+A remembered model that became unavailable stays selected with an explanation, so the
+frontend never switches models on its own. See [llm-providers.md](llm-providers.md).
+
 Enter sends and Shift+Enter adds a line; Enter while an input method (IME) is composing
 Japanese text does nothing. A question refused before streaming (busy, not configured)
-is put back in the composer. When no API key is configured, a notice says so and the
-composer is disabled; earlier conversations remain readable. No answer or history is ever
+is put back in the composer. When no provider is configured, or the selected model cannot
+be used, a notice says so and the composer is disabled; earlier conversations remain readable. No answer or history is ever
 made up by the frontend: everything shown comes from the API.
 
 ## Security and limitations
@@ -154,16 +164,21 @@ made up by the frontend: everything shown comes from the API.
   conversations are not private between people. Do not expose the stack beyond a trusted
   network. The Chat page says this under the composer.
 - **What is stored:** questions and answers as written, citation metadata and excerpts,
-  provider name, configured and served model, the provider's request ID, token counts,
+  requested and actual provider and model, the served model, the provider's request ID, token counts,
   timings and the application request ID. **Not stored:** API keys, provider error texts
   (they can echo request content; only the error class, HTTP status, error type and
   provider request ID are logged), the system prompt per message, hidden reasoning (the provider adapter
   passes on only answer text; any thinking blocks are dropped), IP addresses or user
   agents. Questions can themselves contain personal data;
   there is no retention limit or automatic deletion beyond deleting a conversation.
-- **API keys** are read from the environment into a `SecretStr`, sent only to the provider
-  SDK, and never logged, returned or stored. `/chat/options` reports only whether a key is
-  set. The key is server-side only; the browser never sees it.
+- **API keys** (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY`) are read from the environment into a
+  `SecretStr`, sent only to that provider, and never logged, returned or stored.
+  `/chat/options` and `/chat/models` report only whether a provider is configured, never a
+  key or the Ollama URL. Keys are server-side only; the browser never sees them.
+- **Where questions go:** each answer sends the question, recent history and document
+  passages to the chosen provider. Gemini's free tier allows Google to use that content to
+  improve its products; Ollama keeps it on the Ollama server
+  ([data handling](llm-providers.md#free-tier-limits-and-data-handling)).
 - **Logs** are structured JSON with request IDs. Chat and search logs contain IDs,
   statuses, counts, token usage and timings, not question or answer text.
 - **Limits:** question length (`CHAT_MAX_QUESTION_CHARS`), prompt size (the two token

@@ -72,6 +72,10 @@ export interface ChatMessage {
   grounding: Grounding | null
   error_code: string | null
   error_message: string | null
+  /** What the question asked for (its model choice, or the server default). */
+  requested_provider: string | null
+  requested_model: string | null
+  /** What was called; null when no model was called (no passage matched). */
   provider: string | null
   model: string | null
   served_model: string | null
@@ -90,12 +94,47 @@ export interface ConversationDetail extends ConversationSummary {
 export interface ChatOptions {
   configured: boolean
   provider: string
-  model: string
+  model: string | null
   max_question_chars: number
   retrieval_modes: SearchMode[]
   default_retrieval_mode: SearchMode
   retrieval_top_k: number
   max_output_tokens: number
+}
+
+// --- model catalog (Phase 4.1) ----------------------------------------------------------------
+
+export type ModelCost = 'paid' | 'free_tier' | 'local'
+export type AvailabilityState = 'available' | 'unavailable' | 'unknown'
+
+/** A provider/model pair as the server lists it; sent back unchanged with a question. */
+export interface ModelChoice {
+  provider: string
+  model: string
+}
+
+export interface ProviderEntry {
+  name: string
+  label: string
+  cost: ModelCost
+  configured: boolean
+  reason: string | null
+  notice: string | null
+}
+
+export interface ModelEntry extends ModelChoice {
+  provider_label: string
+  cost: ModelCost
+  configured: boolean
+  availability: { state: AvailabilityState; reason: string | null }
+  selectable: boolean
+  default: boolean
+}
+
+export interface ModelCatalog {
+  providers: ProviderEntry[]
+  models: ModelEntry[]
+  default: ModelChoice | null
 }
 
 interface ErrorEnvelope {
@@ -135,6 +174,14 @@ const json = (body: unknown): RequestInit => ({
 
 export function fetchChatOptions(): Promise<ChatOptions> {
   return request<ChatOptions>('/api/v1/chat/options')
+}
+
+/** The models the server offers. `refresh` asks the server to check availability again. */
+export function fetchChatModels(refresh = false): Promise<ModelCatalog> {
+  return request<ModelCatalog>(`/api/v1/chat/models${refresh ? '?refresh=true' : ''}`, {
+    // Availability checks contact the providers; allow them more time than other calls.
+    signal: AbortSignal.timeout(30_000),
+  })
 }
 
 export function listConversations(limit = 50, offset = 0): Promise<ConversationList> {
@@ -271,6 +318,8 @@ export interface AskBody {
   content: string
   client_message_id: string
   retrieval?: { mode?: SearchMode; document_ids?: string[] }
+  /** Omitted: the server's default model. */
+  model?: ModelChoice
 }
 
 /**

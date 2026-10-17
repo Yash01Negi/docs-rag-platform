@@ -424,3 +424,73 @@ def test_factory_requires_a_key(make_settings: Callable[..., Settings]) -> None:
     assert isinstance(provider, AnthropicProvider)
     assert provider.model == "claude-opus-5-5"
     asyncio.run(provider.aclose())
+
+
+def test_backend_checks_models_and_shares_one_client(
+    make_settings: Callable[..., Settings], caplog: pytest.LogCaptureFixture
+) -> None:
+    from app.llm.anthropic import AnthropicBackend
+    from app.llm.catalog import AvailabilityState, Cost
+
+    caplog.set_level(logging.DEBUG)
+    seen: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request.url.path)
+        model = request.url.path.rsplit("/", 1)[-1]
+        if model == "claude-retired-1":
+            return httpx2.Response(
+                404, json={"type": "error", "error": {"type": "not_found_error", "message": "x"}}
+            )
+        if model == "claude-locked-1":
+            return httpx2.Response(
+                403,
+                json={"type": "error", "error": {"type": "permission_error", "message": "x"}},
+            )
+        if request.url.path.startswith("/v1/models/"):
+            return httpx2.Response(
+                200,
+                json={
+                    "type": "model",
+                    "id": model,
+                    "display_name": model,
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+        return httpx2.Response(
+            200,
+            content=_stream_body(["ok"], model=model),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    settings = _settings(
+        make_settings, anthropic_models="claude-opus-5-5,claude-retired-1,claude-locked-1"
+    )
+    client = _client(handler)
+    backend = AnthropicBackend(settings, client)
+    results = asyncio.run(backend.check())
+    assert results["claude-opus-5-5"].state is AvailabilityState.AVAILABLE
+    assert results["claude-retired-1"].state is AvailabilityState.UNAVAILABLE
+    assert results["claude-locked-1"].state is AvailabilityState.UNAVAILABLE
+    assert backend.cost is Cost.PAID and API_KEY not in caplog.text
+
+    first, second = backend.provider("claude-opus-5-5"), backend.provider("claude-retired-1")
+    assert first is backend.provider("claude-opus-5-5")  # cached per model
+    assert (first.model, second.model) == ("claude-opus-5-5", "claude-retired-1")
+    text, done = asyncio.run(_collect(first))
+    assert text == "ok" and seen[-1] == "/v1/messages"
+    asyncio.run(first.aclose())  # a model's provider does not close the shared client
+    assert not client.is_closed()
+    asyncio.run(backend.aclose())
+    assert client.is_closed()
+    with pytest.raises(KeyError):
+        backend.provider("claude-not-listed")
+
+
+def test_backend_without_key(make_settings: Callable[..., Settings]) -> None:
+    from app.llm.anthropic import AnthropicBackend
+
+    backend = AnthropicBackend(make_settings())
+    assert not backend.configured
+    assert backend.not_configured_reason == "ANTHROPIC_API_KEY is not set"
+    assert backend.models == ("claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")

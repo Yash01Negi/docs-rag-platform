@@ -30,6 +30,8 @@ from app.llm.base import (
     TextDelta,
     Usage,
 )
+from app.llm.catalog import Availability, Cost
+from app.llm.registry import ProviderBackend
 
 logger = logging.getLogger(__name__)
 
@@ -136,26 +138,37 @@ def map_error(error: Exception) -> ProviderError:
     )
 
 
+def create_client(settings: Settings) -> anthropic.AsyncAnthropic:
+    if not settings.llm_configured or settings.anthropic_api_key is None:
+        raise ValueError("ANTHROPIC_API_KEY is not set")
+    return anthropic.AsyncAnthropic(
+        api_key=settings.anthropic_api_key.get_secret_value(),
+        timeout=anthropic.Timeout(
+            settings.llm_read_timeout_seconds,
+            connect=settings.llm_connect_timeout_seconds,
+        ),
+        max_retries=settings.llm_max_retries,
+    )
+
+
 class AnthropicProvider(LLMProvider):
     name = "anthropic"
 
-    def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
-        self.model = settings.llm_model
+    def __init__(
+        self,
+        settings: Settings,
+        client: anthropic.AsyncAnthropic | None = None,
+        *,
+        model: str | None = None,
+        owns_client: bool = True,
+    ) -> None:
+        self.model = model or settings.first_model("anthropic")
         self.temperature = settings.llm_temperature
         self.effort = settings.llm_effort
         self.fallbacks = settings.llm_fallbacks
-        if client is None:
-            if settings.anthropic_api_key is None:
-                raise ValueError("ANTHROPIC_API_KEY is not set")
-            client = anthropic.AsyncAnthropic(
-                api_key=settings.anthropic_api_key.get_secret_value(),
-                timeout=anthropic.Timeout(
-                    settings.llm_read_timeout_seconds,
-                    connect=settings.llm_connect_timeout_seconds,
-                ),
-                max_retries=settings.llm_max_retries,
-            )
-        self._client = client
+        self._client = client if client is not None else create_client(settings)
+        # Providers created by AnthropicBackend share its client; the backend closes it.
+        self._owns_client = owns_client
 
     def _params(self, request: GenerationRequest) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -225,4 +238,80 @@ class AnthropicProvider(LLMProvider):
         )
 
     async def aclose(self) -> None:
-        await self._client.close()
+        if self._owns_client:
+            await self._client.close()
+
+
+class AnthropicBackend(ProviderBackend):
+    """Claude models over one shared ``AsyncAnthropic`` client (paid API)."""
+
+    name = "anthropic"
+    label = "Anthropic Claude"
+
+    def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
+        super().__init__(settings.provider_models("anthropic"))
+        self.settings = settings
+        self._configured = client is not None or settings.llm_configured
+        self._client = client
+
+    @property
+    def configured(self) -> bool:
+        return self._configured
+
+    @property
+    def cost(self) -> Cost:
+        return Cost.PAID
+
+    @property
+    def not_configured_reason(self) -> str | None:
+        return None if self._configured else "ANTHROPIC_API_KEY is not set"
+
+    @property
+    def notice(self) -> str | None:
+        return "Paid API: each question is billed to the server's Anthropic account."
+
+    def _shared_client(self) -> anthropic.AsyncAnthropic:
+        if self._client is None:
+            self._client = create_client(self.settings)
+        return self._client
+
+    def _create(self, model: str) -> LLMProvider:
+        return AnthropicProvider(
+            self.settings, self._shared_client(), model=model, owns_client=False
+        )
+
+    async def check(self) -> dict[str, Availability]:
+        """Ask the Models API about each configured model (no tokens are used)."""
+        client = self._shared_client().with_options(
+            max_retries=0, timeout=self.settings.llm_catalog_check_timeout_seconds
+        )
+        results: dict[str, Availability] = {}
+        for model in self.models:
+            try:
+                await client.models.retrieve(model)
+                results[model] = Availability.available()
+            except anthropic.AnthropicError as exc:
+                error = map_error(exc)
+                logger.info(
+                    "llm_model_check_failed",
+                    extra={"provider": self.name, "model": model, "detail": error.detail},
+                )
+                if error.code is ProviderErrorCode.MODEL_NOT_FOUND:
+                    results[model] = Availability.unavailable(
+                        "Anthropic does not know this model ID (it may be retired)."
+                    )
+                elif error.code is ProviderErrorCode.AUTHENTICATION:
+                    results[model] = Availability.unavailable(
+                        "The server's Anthropic API key was rejected."
+                    )
+                elif error.code is ProviderErrorCode.PERMISSION:
+                    results[model] = Availability.unavailable(
+                        "The server's Anthropic account cannot use this model."
+                    )
+                else:
+                    results[model] = Availability.unknown("Anthropic could not be checked.")
+        return results
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.close()

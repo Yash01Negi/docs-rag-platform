@@ -221,7 +221,10 @@ def test_titles_are_single_line_and_bounded() -> None:
 
 def test_llm_settings_defaults(make_settings: Callable[..., Settings]) -> None:
     settings = make_settings()
-    assert settings.llm_model == "claude-opus-5-5"
+    # LLM_MODEL is optional since Phase 4.1; the effective default is unchanged.
+    assert settings.llm_model is None
+    assert settings.llm_provider == "anthropic"
+    assert settings.default_model == "claude-opus-5-5"
     assert settings.llm_temperature is None
     assert settings.llm_fallbacks == "default"
     assert not settings.llm_configured

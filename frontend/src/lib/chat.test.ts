@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from './api'
-import { SseParser, citedIndices, streamAnswer, type ChatStreamEvent } from './chat'
+import { SseParser, citedIndices, fetchChatModels, streamAnswer, type ChatStreamEvent } from './chat'
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -76,6 +76,37 @@ describe('streamAnswer', () => {
     const promise = streamAnswer('c', { content: 'q', client_message_id: 'x' }, () => {}, new AbortController().signal)
     await expect(promise).rejects.toBeInstanceOf(ApiError)
     await expect(promise).rejects.toMatchObject({ status: 409, code: 'conversation_busy', requestId: 'r1' })
+  })
+})
+
+describe('model choice', () => {
+  it('sends the chosen provider and model with the question', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('event: done\ndata: {"status":"complete"}\n\n', { status: 200 }))
+    await streamAnswer(
+      'conv-1',
+      { content: 'q', client_message_id: 'id-1', model: { provider: 'ollama', model: 'qwen3:8b' } },
+      () => {},
+      new AbortController().signal,
+    )
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual({
+      content: 'q',
+      client_message_id: 'id-1',
+      model: { provider: 'ollama', model: 'qwen3:8b' },
+    })
+  })
+
+  it('fetches the catalog, optionally asking for a fresh check', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => new Response(JSON.stringify({ providers: [], models: [], default: null })))
+    await fetchChatModels()
+    await fetchChatModels(true)
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual([
+      '/api/v1/chat/models',
+      '/api/v1/chat/models?refresh=true',
+    ])
   })
 })
 

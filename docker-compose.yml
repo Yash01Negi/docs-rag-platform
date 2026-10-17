@@ -74,9 +74,24 @@ services:
       SEARCH_DEFAULT_TOP_K: ${SEARCH_DEFAULT_TOP_K:-10}
       SEARCH_FUSION_DEPTH: ${SEARCH_FUSION_DEPTH:-50}
       SEARCH_RRF_K: ${SEARCH_RRF_K:-60}
-      # Chat (Phase 4). The key is passed through from the host environment or .env only.
+      # Chat (Phase 4, 4.1). Keys are passed through from the host environment or .env only.
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_MODEL: ${LLM_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-claude-opus-5-5}
+      ANTHROPIC_MODELS: ${ANTHROPIC_MODELS:-claude-opus-5-5,claude-sonnet-5-5,claude-haiku-5-5}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODELS: ${GEMINI_MODELS:-gemini-3.8-flash,gemini-3.5-flash-lite}
+      GEMINI_TIER: ${GEMINI_TIER:-free}
+      GEMINI_THINKING_LEVEL: ${GEMINI_THINKING_LEVEL:-}
+      # Ollama on the host (macOS app or Linux service). Leave OLLAMA_MODELS empty to turn
+      # Ollama off; host.docker.internal is mapped below for Linux too.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODELS: ${OLLAMA_MODELS:-}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-16384}
+      OLLAMA_THINK: ${OLLAMA_THINK:-}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-}
+      OLLAMA_ALLOW_REMOTE_MODELS: ${OLLAMA_ALLOW_REMOTE_MODELS:-false}
+      LLM_CATALOG_TTL_SECONDS: ${LLM_CATALOG_TTL_SECONDS:-300}
       LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-2048}
       LLM_FALLBACKS: ${LLM_FALLBACKS:-default}
       LLM_REQUEST_TIMEOUT_SECONDS: ${LLM_REQUEST_TIMEOUT_SECONDS:-180}
@@ -86,6 +101,9 @@ services:
       OMP_NUM_THREADS: ${BACKEND_TORCH_THREADS:-2}
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    # Docker Desktop provides host.docker.internal; on Linux this maps it to the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./backend/app:/app/app:ro
       - uploads:/data/uploads

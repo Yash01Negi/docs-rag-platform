@@ -53,6 +53,8 @@ from app.core.errors import ApiError
 from app.core.logging import request_id_var
 from app.db.models import Conversation, Message, MessageCitation, MessageStatus
 from app.llm.base import Usage
+from app.llm.catalog import AvailabilityState, Cost, ModelRef
+from app.llm.registry import LLMRegistry
 from app.search.retrieval import unknown_document_ids
 from app.search.service import SearchMode
 
@@ -118,6 +120,15 @@ class RetrievalBody(BaseModel):
         return value
 
 
+class ModelChoice(BaseModel):
+    """A provider/model pair from GET /chat/models. Anything else is rejected."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9-]+$")
+    model: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
+
+
 class AskBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +142,14 @@ class AskBody(BaseModel):
         ),
     )
     retrieval: RetrievalBody | None = None
+    model: ModelChoice | None = Field(
+        default=None,
+        description=(
+            "The provider and model to answer with, as listed by GET /chat/models. Omitted: "
+            "the server's default (LLM_PROVIDER / LLM_MODEL). The server never substitutes "
+            "another provider or model when the chosen one fails."
+        ),
+    )
 
     @field_validator("content")
     @classmethod
@@ -203,8 +222,12 @@ class MessageOut(BaseModel):
     grounding: str | None
     error_code: str | None
     error_message: str | None
-    provider: str | None
-    model: str | None = Field(description="The configured model.")
+    requested_provider: str | None = Field(
+        description="The provider the question asked for (its selection, or the default)."
+    )
+    requested_model: str | None = Field(description="The model the question asked for.")
+    provider: str | None = Field(description="The provider that was called (null if none).")
+    model: str | None = Field(description="The model that was called (null if none).")
     served_model: str | None = Field(description="The model that generated the answer.")
     stop_reason: str | None
     usage: UsageOut | None
@@ -221,9 +244,9 @@ class ConversationDetail(ConversationSummary):
 
 
 class ChatOptions(BaseModel):
-    configured: bool = Field(description="False when no LLM credentials are set.")
-    provider: str
-    model: str
+    configured: bool = Field(description="False when no provider has credentials.")
+    provider: str = Field(description="The default provider (used when a question names none).")
+    model: str | None = Field(description="The default model.")
     max_question_chars: int
     retrieval_modes: list[SearchMode]
     default_retrieval_mode: SearchMode
@@ -299,6 +322,8 @@ def _message_out(
         grounding=message.grounding,
         error_code=message.error_code,
         error_message=message.error_message,
+        requested_provider=message.requested_provider,
+        requested_model=message.requested_model,
         provider=message.provider,
         model=message.model,
         served_model=message.served_model,
@@ -347,10 +372,12 @@ def _database_error(exc: SQLAlchemyError) -> ApiError:
 async def chat_options(request: Request) -> ChatOptions:
     """Whether answering is configured, and the limits clients should validate against."""
     settings = request.app.state.settings
+    registry: LLMRegistry = request.app.state.chat.registry
+    default = registry.default
     return ChatOptions(
-        configured=request.app.state.chat.provider is not None,
-        provider=settings.llm_provider,
-        model=settings.llm_model,
+        configured=registry.any_configured,
+        provider=default.provider if default else settings.llm_provider,
+        model=default.model if default else settings.default_model,
         max_question_chars=settings.chat_max_question_chars,
         retrieval_modes=list(SearchMode),
         default_retrieval_mode=SearchMode(
@@ -358,6 +385,88 @@ async def chat_options(request: Request) -> ChatOptions:
         ),
         retrieval_top_k=settings.chat_retrieval_top_k,
         max_output_tokens=settings.llm_max_output_tokens,
+    )
+
+
+class AvailabilityOut(BaseModel):
+    state: AvailabilityState = Field(
+        description=(
+            "available: the provider confirmed the model. unavailable: it cannot be used (see "
+            "reason). unknown: not checked, or the check failed; asking may still work."
+        )
+    )
+    reason: str | None
+
+
+class ProviderOut(BaseModel):
+    name: str = Field(description="The value to send as model.provider.")
+    label: str
+    cost: Cost = Field(
+        description="paid: billed per token. free_tier: a provider's free tier (rate-limited; "
+        "the provider may use the data). local: runs on the configured Ollama server."
+    )
+    configured: bool
+    reason: str | None = Field(description="Why the provider is not configured.")
+    notice: str | None = Field(description="Cost, limits and data use, for the selector.")
+
+
+class ModelOut(BaseModel):
+    provider: str
+    provider_label: str
+    model: str = Field(description="The value to send as model.model.")
+    cost: Cost
+    configured: bool
+    availability: AvailabilityOut
+    selectable: bool = Field(description="configured and not known to be unavailable.")
+    default: bool
+
+
+class ModelCatalog(BaseModel):
+    providers: list[ProviderOut]
+    models: list[ModelOut]
+    default: ModelChoice | None = Field(description="Used when a question names no model.")
+
+
+@router.get("/chat/models", response_model=ModelCatalog)
+async def chat_models(request: Request, refresh: bool = False) -> ModelCatalog:
+    """The providers and models this server offers, and whether each can be used now.
+
+    Built from server configuration only. Availability comes from each provider (Claude
+    and Gemini model lists, the models installed in Ollama) and is cached for
+    LLM_CATALOG_TTL_SECONDS; ``refresh=true`` checks again (at most every 10 seconds).
+    Never includes credentials or provider URLs.
+    """
+    registry: LLMRegistry = request.app.state.chat.registry
+    providers, models = await registry.catalog(refresh=refresh)
+    default = registry.default
+    return ModelCatalog(
+        providers=[
+            ProviderOut(
+                name=p.name,
+                label=p.label,
+                cost=p.cost,
+                configured=p.configured,
+                reason=p.reason,
+                notice=p.notice,
+            )
+            for p in providers
+        ],
+        models=[
+            ModelOut(
+                provider=m.provider,
+                provider_label=m.provider_label,
+                model=m.model,
+                cost=m.cost,
+                configured=m.configured,
+                availability=AvailabilityOut(
+                    state=m.availability.state, reason=m.availability.reason
+                ),
+                selectable=m.selectable,
+                default=m.default,
+            )
+            for m in models
+        ],
+        default=ModelChoice(provider=default.provider, model=default.model) if default else None,
     )
 
 
@@ -688,9 +797,13 @@ _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
         },
         404: {"model": ErrorResponse, "description": "Conversation not found"},
         409: {"model": ErrorResponse, "description": "An answer is already being generated"},
-        422: {"model": ErrorResponse, "description": "Invalid question or filters"},
+        422: {"model": ErrorResponse, "description": "Invalid question, filters or model"},
         429: {"model": ErrorResponse, "description": "Too many answers in progress"},
-        503: {"model": ErrorResponse, "description": "LLM not configured or database down"},
+        503: {
+            "model": ErrorResponse,
+            "description": "LLM or the chosen provider not configured, model unavailable, or "
+            "database down",
+        },
     },
 )
 async def ask(
@@ -720,6 +833,7 @@ async def ask(
             language=retrieval.language,
         ),
         request_id=request_id_var.get(),
+        model=ModelRef(body.model.provider, body.model.model) if body.model else None,
     )
     try:
         if retrieval.document_ids:

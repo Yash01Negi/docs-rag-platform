@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiError } from '../lib/api'
 import * as chat from '../lib/chat'
@@ -59,6 +59,8 @@ function message(overrides: Partial<chat.ChatMessage>): chat.ChatMessage {
     grounding: null,
     error_code: null,
     error_message: null,
+    requested_provider: null,
+    requested_model: null,
     provider: null,
     model: null,
     served_model: null,
@@ -100,6 +102,75 @@ const ANSWER = message({
   ],
 })
 
+function entry(overrides: Partial<chat.ModelEntry> & chat.ModelChoice): chat.ModelEntry {
+  return {
+    provider_label: overrides.provider,
+    cost: 'paid',
+    configured: true,
+    availability: { state: 'available', reason: null },
+    selectable: true,
+    default: false,
+    ...overrides,
+  }
+}
+
+const CATALOG: chat.ModelCatalog = {
+  providers: [
+    {
+      name: 'anthropic',
+      label: 'Anthropic Claude',
+      cost: 'paid',
+      configured: true,
+      reason: null,
+      notice: 'Paid API: each question is billed to the server\'s Anthropic account.',
+    },
+    {
+      name: 'gemini',
+      label: 'Google Gemini',
+      cost: 'free_tier',
+      configured: true,
+      reason: null,
+      notice: 'Free tier: low rate limits, and Google may use prompts and answers to improve its products.',
+    },
+    {
+      name: 'ollama',
+      label: 'Ollama (local)',
+      cost: 'local',
+      configured: false,
+      reason: 'OLLAMA_BASE_URL is not set',
+      notice: null,
+    },
+  ],
+  models: [
+    entry({ provider: 'anthropic', provider_label: 'Anthropic Claude', model: 'test-model', default: true }),
+    entry({
+      provider: 'gemini',
+      provider_label: 'Google Gemini',
+      model: 'gemini-3.8-flash',
+      cost: 'free_tier',
+      availability: { state: 'unknown', reason: null },
+    }),
+    entry({
+      provider: 'gemini',
+      provider_label: 'Google Gemini',
+      model: 'gemini-retired',
+      cost: 'free_tier',
+      availability: { state: 'unavailable', reason: 'Google does not list this model ID.' },
+      selectable: false,
+    }),
+    entry({
+      provider: 'ollama',
+      provider_label: 'Ollama (local)',
+      model: 'qwen3:8b',
+      cost: 'local',
+      configured: false,
+      availability: { state: 'unavailable', reason: 'OLLAMA_BASE_URL is not set' },
+      selectable: false,
+    }),
+  ],
+  default: { provider: 'anthropic', model: 'test-model' },
+}
+
 function LocationProbe() {
   const { pathname } = useLocation()
   return <output data-testid="location">{pathname}</output>
@@ -110,9 +181,18 @@ function renderPage(
   {
     options = OPTIONS,
     conversations = [summary()],
-  }: { options?: chat.ChatOptions; conversations?: chat.ConversationSummary[] } = {},
+    catalog = CATALOG,
+  }: {
+    options?: chat.ChatOptions
+    conversations?: chat.ConversationSummary[]
+    catalog?: chat.ModelCatalog | Error
+  } = {},
 ) {
   vi.spyOn(chat, 'fetchChatOptions').mockResolvedValue(options)
+  const models =
+    catalog instanceof Error
+      ? vi.spyOn(chat, 'fetchChatModels').mockRejectedValue(catalog)
+      : vi.spyOn(chat, 'fetchChatModels').mockResolvedValue(catalog)
   const list = vi
     .spyOn(chat, 'listConversations')
     .mockResolvedValue({ items: conversations, total: conversations.length, limit: 50, offset: 0 })
@@ -130,7 +210,7 @@ function renderPage(
       </Routes>
     </MemoryRouter>,
   )
-  return { list }
+  return { list, models }
 }
 
 const input = () => screen.getByRole('textbox', { name: 'Your question' })
@@ -199,7 +279,8 @@ describe('ChatPage', () => {
       },
     })
     stream.emit({ event: 'delta', data: { text: '週に2日' } })
-    expect(await screen.findByText(/週に2日/)).toBeInTheDocument()
+    // The exact text is the live answer's (the stored answer, loaded meanwhile, is longer).
+    expect(await screen.findByText('週に2日')).toBeInTheDocument()
     expect(screen.getByText(/Retrieved passages/)).toBeInTheDocument()
 
     stream.emit({ event: 'delta', data: { text: 'までです [S1]。' } })
@@ -393,5 +474,158 @@ describe('ChatPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(remove).toHaveBeenCalledWith('conv-1'))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/chat$/))
+  })
+})
+
+describe('ChatPage model selection', () => {
+  beforeEach(() => window.sessionStorage.clear())
+
+  const modelSelect = () => screen.getByRole('combobox', { name: 'Model' })
+
+  it('lists providers with cost and availability, and explains unavailable models', async () => {
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    renderPage('/chat/conv-1')
+
+    await screen.findByRole('combobox', { name: 'Model' })
+    const groups = within(modelSelect()).getAllByRole('group')
+    expect(groups.map((g) => g.getAttribute('label'))).toEqual([
+      'Anthropic Claude · Paid',
+      'Google Gemini · Free tier',
+      'Ollama (local) · Local',
+    ])
+    expect(modelSelect()).toHaveValue('anthropic|test-model')
+    expect(screen.getByRole('option', { name: 'test-model (default)' })).toBeEnabled()
+    expect(screen.getByRole('option', { name: 'gemini-retired — unavailable' })).toBeDisabled()
+    expect(screen.getByRole('option', { name: 'qwen3:8b — not configured' })).toBeDisabled()
+    expect(screen.getByText('Available')).toBeInTheDocument()
+    expect(screen.getByText(/billed to the server's Anthropic account/)).toBeInTheDocument()
+
+    expect(screen.getByText('Why 2 models are unavailable')).toBeInTheDocument()
+    expect(screen.getByText(/Google does not list this model ID/)).toBeInTheDocument()
+    expect(screen.getByText(/OLLAMA_BASE_URL is not set/)).toBeInTheDocument()
+  })
+
+  it('sends the chosen model, switches between messages and remembers the choice', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([QUESTION, ANSWER]))
+    const stream = vi.spyOn(chat, 'streamAnswer').mockResolvedValue()
+    renderPage('/chat/conv-1')
+
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Model' }), 'gemini|gemini-3.8-flash')
+    expect(screen.getByText('Free tier')).toBeInTheDocument()
+    expect(screen.getByText('Availability not confirmed')).toBeInTheDocument()
+    expect(screen.getByText(/Google may use prompts and answers/)).toBeInTheDocument()
+    await user.type(input(), 'first question{Enter}')
+    await waitFor(() => expect(stream).toHaveBeenCalledOnce())
+    expect(stream.mock.calls[0][1].model).toEqual({ provider: 'gemini', model: 'gemini-3.8-flash' })
+    expect(JSON.parse(window.sessionStorage.getItem('yashrag.chat.model') ?? '{}')).toEqual({
+      provider: 'gemini',
+      model: 'gemini-3.8-flash',
+    })
+
+    // Same conversation, another model for the next question.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument())
+    await user.selectOptions(modelSelect(), 'anthropic|test-model')
+    await user.type(input(), 'second question{Enter}')
+    await waitFor(() => expect(stream).toHaveBeenCalledTimes(2))
+    expect(stream.mock.calls[1][0]).toBe('conv-1')
+    expect(stream.mock.calls[1][1].model).toEqual({ provider: 'anthropic', model: 'test-model' })
+  })
+
+  it('restores the remembered model for this browser session', async () => {
+    window.sessionStorage.setItem(
+      'yashrag.chat.model',
+      JSON.stringify({ provider: 'gemini', model: 'gemini-3.8-flash' }),
+    )
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    renderPage('/chat/conv-1')
+    await waitFor(() => expect(modelSelect()).toHaveValue('gemini|gemini-3.8-flash'))
+  })
+
+  it('does not switch on its own when the remembered model became unavailable', async () => {
+    const user = userEvent.setup()
+    window.sessionStorage.setItem(
+      'yashrag.chat.model',
+      JSON.stringify({ provider: 'gemini', model: 'gemini-retired' }),
+    )
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    const stream = vi.spyOn(chat, 'streamAnswer').mockResolvedValue()
+    renderPage('/chat/conv-1')
+
+    await waitFor(() => expect(modelSelect()).toHaveValue('gemini|gemini-retired'))
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'gemini-retired cannot be used: Google does not list this model ID. Choose another model.',
+    )
+    await user.type(input(), 'question{Enter}')
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+    expect(stream).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the model list when the server says the model is unavailable', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    vi.spyOn(chat, 'streamAnswer').mockRejectedValue(
+      new ApiError(503, 'model_unavailable', 'test-model is not available: retired.'),
+    )
+    const { models } = renderPage('/chat/conv-1')
+
+    await screen.findByRole('combobox', { name: 'Model' })
+    await user.type(input(), 'question{Enter}')
+    expect(await screen.findByText('test-model is not available: retired.')).toBeInTheDocument()
+    expect(input()).toHaveValue('question')
+    await waitFor(() => expect(models).toHaveBeenLastCalledWith(true))
+  })
+
+  it('checks availability again on request', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    const { models } = renderPage('/chat/conv-1')
+    await user.click(await screen.findByRole('button', { name: 'Check again' }))
+    await waitFor(() => expect(models).toHaveBeenLastCalledWith(true))
+  })
+
+  it('falls back to the server default when the model list cannot be loaded', async () => {
+    const user = userEvent.setup()
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    const stream = vi.spyOn(chat, 'streamAnswer').mockResolvedValue()
+    renderPage('/chat/conv-1', { catalog: new Error('timed out') })
+
+    expect(await screen.findByText(/The model list could not be loaded \(timed out\)/)).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Model' })).not.toBeInTheDocument()
+    await user.type(input(), 'question{Enter}')
+    await waitFor(() => expect(stream).toHaveBeenCalledOnce())
+    expect(stream.mock.calls[0][1]).not.toHaveProperty('model')
+  })
+
+  it('says when no model can be used', async () => {
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([]))
+    renderPage('/chat/conv-1', {
+      catalog: { ...CATALOG, models: CATALOG.models.map((m) => ({ ...m, selectable: false })) },
+    })
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'No configured model is available on the server.',
+    )
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+  })
+
+  it('shows which provider and model answered each stored message', async () => {
+    const gemini = message({
+      ...ANSWER,
+      id: 'a2',
+      sequence: 4,
+      reply_to_id: 'u2',
+      requested_provider: 'gemini',
+      requested_model: 'gemini-3.8-flash',
+      provider: 'gemini',
+      model: 'gemini-3.8-flash',
+      served_model: 'gemini-3.8-flash-001',
+    })
+    const second = message({ id: 'u2', sequence: 3, content: 'follow-up' })
+    vi.spyOn(chat, 'getConversation').mockResolvedValue(detail([QUESTION, ANSWER, second, gemini]))
+    renderPage('/chat/conv-1')
+    expect(await screen.findByText(/Answered by test-model \(Claude\)/)).toBeInTheDocument()
+    expect(
+      screen.getByText(/Answered by gemini-3.8-flash-001 \(Gemini\), fallback from gemini-3.8-flash/),
+    ).toBeInTheDocument()
   })
 })

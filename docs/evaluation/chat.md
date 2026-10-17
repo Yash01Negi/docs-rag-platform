@@ -86,6 +86,11 @@ ANTHROPIC_API_KEY=… uv run --extra embeddings python -m evaluation.chat_eval -
   --provider configured --mode semantic
 ```
 
+`--provider configured` uses the server's default model (`LLM_PROVIDER` / `LLM_MODEL`), so
+the same command evaluates Gemini (`LLM_PROVIDER=gemini GEMINI_API_KEY=…`) or a local
+Ollama model (`LLM_PROVIDER=ollama OLLAMA_BASE_URL=… OLLAMA_MODELS=…`). The results record
+which model answered. On Gemini's free tier, 26 questions may exceed the per-minute limits.
+
 Each run writes `results.json` (every answer, source, citation and score) and `report.md`
 to `--output-dir` (default `evaluation/results/chat`, ignored by Git). `--questions
 en-en-01,ja-ja-01` runs a subset. The report says in bold when no language model was used.

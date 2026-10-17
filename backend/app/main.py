@@ -24,7 +24,7 @@ from app.core.limits import MULTIPART_OVERHEAD_BYTES, BodySizeLimitMiddleware
 from app.core.logging import configure_logging, request_id_var
 from app.db.session import create_engine, create_session_factory
 from app.embeddings import create_embedding_provider
-from app.llm import LLMProvider, create_llm_provider
+from app.llm import LLMProvider, LLMRegistry, create_llm_registry
 from app.search.service import SearchService
 from app.services.documents import clean_staging_directory, staging_directory
 from app.storage import LocalFileStorage
@@ -37,9 +37,15 @@ _VALID_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def create_app(
-    settings: Settings | None = None, llm_provider: LLMProvider | None = None
+    settings: Settings | None = None,
+    llm_provider: LLMProvider | None = None,
+    llm_registry: LLMRegistry | None = None,
 ) -> FastAPI:
-    """Build the application. ``llm_provider`` overrides the configured provider (tests)."""
+    """Build the application.
+
+    ``llm_provider`` (a single provider) or ``llm_registry`` replaces the configured
+    providers (tests).
+    """
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
@@ -52,7 +58,12 @@ def create_app(
         # The provider does not load the model until the first semantic search (or the
         # warm-up below); the model libraries are imported lazily.
         app.state.search = SearchService(settings, create_embedding_provider(settings))
-        app.state.llm = llm_provider or create_llm_provider(settings)
+        if llm_registry is not None:
+            app.state.llm = llm_registry
+        elif llm_provider is not None:
+            app.state.llm = LLMRegistry.single(llm_provider)
+        else:
+            app.state.llm = create_llm_registry(settings)
         app.state.chat = ChatService(settings, app.state.sessions, app.state.search, app.state.llm)
         # Answers being generated; each runs in its own task (see conversations.ask).
         app.state.chat_tasks = set()
@@ -66,8 +77,15 @@ def create_app(
             extra={
                 "environment": settings.environment.value,
                 "version": __version__,
-                "llm_configured": app.state.llm is not None,
-                "llm_model": settings.llm_model if app.state.llm is not None else None,
+                "llm_configured": app.state.llm.any_configured,
+                "llm_providers": [
+                    name for name, b in app.state.llm.backends.items() if b.configured
+                ],
+                "llm_default": (
+                    f"{app.state.llm.default.provider}:{app.state.llm.default.model}"
+                    if app.state.llm.default
+                    else None
+                ),
             },
         )
         try:
@@ -76,8 +94,7 @@ def create_app(
             if warm_up is not None:
                 warm_up.cancel()
             await wait_for_answers(app.state.chat_tasks, timeout=10)
-            if app.state.llm is not None:
-                await app.state.llm.aclose()
+            await app.state.llm.aclose()
             app.state.search.close()
             await app.state.engine.dispose()
             logger.info("application_shutdown")
