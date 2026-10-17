@@ -1,6 +1,6 @@
-"""Document management endpoints (Phase 2: ingestion and indexing only).
+"""Document management endpoints: upload, list, inspect, retry, reindex and delete.
 
-Retrieval, chat and answer generation are not part of this API yet.
+Documents imported by connectors (Phase 5) are listed here too, with their S3 source.
 """
 
 import uuid
@@ -17,15 +17,17 @@ from app.api.v1.schemas import (
     ChunkPreview,
     DocumentDetail,
     DocumentList,
+    DocumentSourceInfo,
     DocumentSummary,
     ErrorResponse,
     JobSummary,
     UploadLimits,
     UploadResult,
 )
+from app.connectors.service import document_sources
 from app.core.errors import ApiError
 from app.core.logging import request_id_var
-from app.db.models import DocumentStatus, FileType
+from app.db.models import Connector, ConnectorObject, DocumentStatus, FileType
 from app.ingestion.validation import MIME_TYPES, SUPPORTED_EXTENSIONS
 from app.services import documents as service
 from app.storage import StoredFileNotFoundError
@@ -124,6 +126,7 @@ async def list_documents(
 async def get_document(document_id: uuid.UUID, session: Session) -> DocumentDetail:
     document = await service.get_document(session, document_id)
     job = await service.latest_job(session, document_id)
+    source = (await document_sources(session, [document_id])).get(document_id)
     detail = DocumentDetail.model_validate(
         {
             **DocumentSummary.model_validate(document).model_dump(),
@@ -134,9 +137,26 @@ async def get_document(document_id: uuid.UUID, session: Session) -> DocumentDeta
             "embedding_dimension": document.embedding_dimension,
             "processed_at": document.processed_at,
             "latest_job": JobSummary.model_validate(job) if job else None,
+            "source": _source_info(*source) if source else None,
         }
     )
     return detail
+
+
+def _source_info(mapping: ConnectorObject, connector: Connector) -> DocumentSourceInfo:
+    return DocumentSourceInfo(
+        connector_id=connector.id,
+        connector_name=connector.name,
+        provider=connector.provider,
+        bucket=connector.bucket,
+        object_key=mapping.object_key,
+        uri=f"s3://{connector.bucket}/{mapping.object_key}",
+        etag=mapping.etag,
+        version_id=mapping.version_id,
+        size_bytes=mapping.size_bytes,
+        last_modified=mapping.last_modified,
+        last_synced_at=mapping.last_synced_at,
+    )
 
 
 @router.get("/{document_id}/chunks", response_model=ChunkList, responses=_ERRORS)

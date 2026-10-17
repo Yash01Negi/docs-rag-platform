@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app.api.v1.connectors import router as connectors_router
 from app.api.v1.conversations import router as conversations_router
 from app.api.v1.conversations import wait_for_answers
 from app.api.v1.documents import router as documents_router
@@ -158,4 +159,5 @@ def create_app(
     app.include_router(documents_router, prefix=API_V1_PREFIX)
     app.include_router(search_router, prefix=API_V1_PREFIX)
     app.include_router(conversations_router, prefix=API_V1_PREFIX)
+    app.include_router(connectors_router, prefix=API_V1_PREFIX)
     return app
