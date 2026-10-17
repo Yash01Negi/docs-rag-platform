@@ -98,6 +98,104 @@ jobs:
       - name: Production build
         run: npm run build
 
+  s3-smoke:
+    name: S3 smoke (MinIO emulator)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg17
+        env:
+          POSTGRES_USER: yashrag
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: yashrag_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U yashrag -d yashrag_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Throwaway credentials for ephemeral CI containers only. No AWS account is used:
+      # this job talks to a local MinIO emulator, never to Amazon S3.
+      DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
+      TEST_DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
+      MINIO_ROOT_USER: ci-minio-admin
+      MINIO_ROOT_PASSWORD: ci-only-minio-password
+      MINIO_IMAGE: minio/minio:RELEASE.2025-04-22T22-12-26Z
+      MC_IMAGE: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install dependencies (from uv.lock)
+        run: uv sync --locked
+
+      # A service container cannot pass MinIO its "server" command, so start it directly.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD "$MINIO_IMAGE" server /data
+          for _ in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:9000/minio/health/ready && exit 0
+            sleep 2
+          done
+          docker logs minio
+          exit 1
+
+      # The same script as the s3-local Compose profile: a versioned bucket with the sample
+      # documents and a read-only user with the least-privilege policy from docs/s3-setup.md.
+      - name: Create the bucket and a read-only user
+        working-directory: .
+        run: |
+          docker run --rm --network host --entrypoint /bin/sh \
+            -e MINIO_URL=http://127.0.0.1:9000 -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+            -e S3_LOCAL_BUCKET=yashrag-smoke \
+            -e S3_LOCAL_READER_ACCESS_KEY=ci-reader \
+            -e S3_LOCAL_READER_SECRET_KEY=ci-only-reader-secret \
+            -v "$PWD/infra/s3-local:/setup:ro" "$MC_IMAGE" /setup/setup.sh
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      # The connector runs with the read-only user; the test's own writes use the admin keys.
+      - name: Smoke test (new, changed and deleted objects)
+        env:
+          RUN_S3_SMOKE_TESTS: "1"
+          S3_SMOKE_BUCKET: yashrag-smoke
+          S3_SMOKE_WRITE: "1"
+          S3_ENDPOINT_URL: http://127.0.0.1:9000
+          S3_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ci-reader
+          AWS_SECRET_ACCESS_KEY: ci-only-reader-secret
+          S3_SMOKE_WRITER_ACCESS_KEY_ID: ci-minio-admin
+          S3_SMOKE_WRITER_SECRET_ACCESS_KEY: ci-only-minio-password
+        run: uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
+
+      - name: Smoke test (read-only, sample documents)
+        env:
+          RUN_S3_SMOKE_TESTS: "1"
+          S3_SMOKE_BUCKET: yashrag-smoke
+          S3_SMOKE_PREFIX: handbook/
+          S3_ENDPOINT_URL: http://127.0.0.1:9000
+          S3_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ci-reader
+          AWS_SECRET_ACCESS_KEY: ci-only-reader-secret
+        run: uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
+
+      - name: MinIO logs
+        if: failure()
+        run: docker logs minio
+
   compose:
     name: Docker Compose config
     runs-on: ubuntu-24.04
@@ -110,3 +208,8 @@ jobs:
           docker compose config --quiet
           docker compose config --services | sort | tr '\n' ' ' | tee /dev/stderr \
             | grep -q "backend db frontend migrate worker"
+          # The optional emulator profile adds only MinIO and its setup job.
+          MINIO_ROOT_PASSWORD=ci-only-minio-password docker compose --profile s3-local config --quiet
+          MINIO_ROOT_PASSWORD=ci-only-minio-password docker compose --profile s3-local config --services \
+            | sort | tr '\n' ' ' | tee /dev/stderr \
+            | grep -q "backend db frontend migrate minio minio-setup worker"
