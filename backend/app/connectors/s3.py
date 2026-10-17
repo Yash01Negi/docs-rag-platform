@@ -9,6 +9,7 @@ boto3 is synchronous; callers run these methods in a thread.
 """
 
 import logging
+import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -171,7 +172,35 @@ def map_error(exc: BaseException) -> ConnectorError:
     )
 
 
+# Docker Compose passes unset variables through as empty strings; botocore would treat an
+# empty AWS_PROFILE as a profile named "" and an empty region as invalid.
+_AWS_ENVIRONMENT = (
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+)
+
+
+def drop_empty_aws_environment() -> None:
+    for name in _AWS_ENVIRONMENT:
+        if name in os.environ and not os.environ[name].strip():
+            del os.environ[name]
+
+
 def create_client(settings: Settings) -> Any:
+    """An S3 client using the standard AWS credential chain. Raises ConnectorError."""
+    drop_empty_aws_environment()
+    try:
+        return _create_client(settings)
+    except Exception as exc:
+        raise map_error(exc) from exc
+
+
+def _create_client(settings: Settings) -> Any:
     style = settings.s3_addressing_style
     if style == "auto" and settings.s3_endpoint_url:
         style = "path"  # what MinIO and most emulators expect

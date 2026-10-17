@@ -366,3 +366,23 @@ def test_missing_bucket_and_missing_credentials(
     with pytest.raises(ConnectorError) as caught:
         no_credentials.list_page("docs", "", None, 10)
     assert caught.value.code is ConnectorErrorCode.CREDENTIALS_MISSING
+
+
+def test_empty_aws_variables_from_compose_are_ignored(
+    make_settings: Callable[..., Settings], aws: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_SESSION_TOKEN"):
+        monkeypatch.setenv(name, "")
+    client = create_client(_settings(make_settings))
+    assert client.meta.region_name == "us-east-1"
+
+
+def test_unknown_profile_is_a_credentials_error(
+    make_settings: Callable[..., Settings], aws: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AWS_PROFILE", "no-such-profile")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent")
+    with pytest.raises(ConnectorError) as caught:
+        create_client(_settings(make_settings))
+    assert caught.value.code is ConnectorErrorCode.CREDENTIALS_MISSING
+    assert "no-such-profile" not in caught.value.message
