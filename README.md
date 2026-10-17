@@ -16,8 +16,8 @@ quality.
 > citations that open the document at the cited passage. Conversations are stored and can
 > be continued, renamed and deleted, and the model can change between questions.
 >
-> **S3 connectors are verified against emulators only** (moto in the test suite, MinIO in
-> CI). No request has been made to real Amazon S3 yet
+> **S3 connectors are verified against emulators only** (moto, in the test suite and as an
+> HTTP server in CI). No request has been made to real Amazon S3 yet
 > ([docs/s3-smoke-tests.md](docs/s3-smoke-tests.md) explains how to check a real bucket).
 >
 > **Measured, not assumed:** retrieval was evaluated with the real model on 51 judged
@@ -72,11 +72,11 @@ quality.
 | Citations checked against retrieved chunks, stored, and relocated after reindexing | ✅ Implemented |
 | Chat page (history sidebar, streaming, citations, expandable sources, document links) | ✅ Implemented |
 | Answer evaluation (26 judged EN/JA/cross-language questions; lexical metrics) | ✅ Implemented; run with a non-LLM baseline only |
-| S3 connectors: bucket and prefix, PDF/Markdown/text, credentials from the worker's AWS chain only, server-side allowlist | ✅ Implemented (verified with moto and MinIO; not yet against real AWS) |
+| S3 connectors: bucket and prefix, PDF/Markdown/text, credentials from the worker's AWS chain only, server-side allowlist | ✅ Implemented (verified with moto; not yet against real AWS) |
 | Incremental sync (ETag and size), If-Match downloads, no mixed revisions, deletion only after a complete listing | ✅ Implemented |
 | Database-backed sync scheduler and runs (leases, retries with backoff, crash recovery, cancellation, multiple workers) | ✅ Implemented |
 | Connectors UI (list, create, edit, sync now, history, cancel, delete) and S3 source details on documents | ✅ Implemented |
-| Optional MinIO Compose profile and S3 smoke tests (MinIO in CI) | ✅ Implemented |
+| Optional local S3 emulator Compose profile and S3 smoke tests (run in CI) | ✅ Implemented |
 | Authentication | 🕒 Planned |
 | AWS deployment | 🕒 Planned |
 
@@ -90,7 +90,7 @@ quality.
 | Database | PostgreSQL 17, pgvector 0.8.1, SQLAlchemy 2 (async), psycopg 3, Alembic |
 | Answer generation | Anthropic Claude (official `anthropic` SDK), Google Gemini (official `google-genai` SDK) and local models through Ollama's HTTP API; Claude (`claude-opus-5-5`) is the default |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, React Router, react-markdown |
-| Tooling | uv (locked Python dependencies), Ruff (lint + format), pytest, moto (S3 emulator for tests), oxlint, Vitest, Docker Compose, MinIO (optional local S3), GitHub Actions |
+| Tooling | uv (locked Python dependencies), Ruff (lint + format), pytest, moto (S3 emulator for tests and the optional local S3 profile), oxlint, Vitest, Docker Compose, GitHub Actions |
 
 ## Architecture overview
 
@@ -103,7 +103,7 @@ flowchart LR
     be -- "store original" --> files[("uploads<br/>volume")]
     be -- "stream answers" --> llm(["Anthropic API · Gemini API<br/>or Ollama (local)"])
     worker["Worker<br/>S3 sync · extract · chunk · BGE-M3"] -- "claim jobs · write chunks" --> db
-    worker -- "list · read objects" --> s3(["Amazon S3<br/>(or MinIO)"])
+    worker -- "list · read objects" --> s3(["Amazon S3<br/>(or local emulator)"])
     files --> worker
     cache[("model cache<br/>volume")] --> worker
     mig["Alembic<br/>migrations"] --> db
@@ -144,7 +144,7 @@ docs-rag-platform/
 │   └── evaluation/      Judged evaluation set, metrics, harness and benchmarks
 ├── frontend/            React + TypeScript + Vite app
 ├── docs/                Architecture notes and decision records
-├── infra/s3-local/      Optional MinIO emulator setup and sample documents
+├── infra/s3-local/      Optional local S3 emulator and sample documents
 ├── .github/workflows/   CI
 ├── docker-compose.yml   Local development stack
 └── .env.example         Configuration template
@@ -285,12 +285,12 @@ sync on a schedule. AWS credentials are set on the worker only (environment vari
 buckets can be used. Full setup, including a least-privilege IAM policy:
 [docs/s3-setup.md](docs/s3-setup.md).
 
-To try connectors without an AWS account, start the optional MinIO emulator with sample
+To try connectors without an AWS account, start the optional local S3 emulator with sample
 documents:
 
 ```bash
-# in .env: MINIO_ROOT_PASSWORD, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (a local reader
-# you choose), S3_ENDPOINT_URL=http://minio:9000, S3_REGION=us-east-1,
+# in .env: AWS_ACCESS_KEY_ID=local-test, AWS_SECRET_ACCESS_KEY=local-test,
+# S3_ENDPOINT_URL=http://s3-emulator:9000, S3_REGION=us-east-1,
 # S3_ALLOWED_SOURCES=yashrag-local
 docker compose --profile s3-local up --build
 ```
@@ -353,12 +353,12 @@ All configuration is read from environment variables (or `.env`). See
 | `CHAT_MAX_QUESTION_CHARS` / `CHAT_MAX_CONCURRENT_GENERATIONS` | no | `4000` characters; `4` answers at once per API process. |
 | `CHAT_FOLLOWUP_MAX_CHARS` / `CHAT_CITATION_EXCERPT_CHARS` / `CHAT_HEARTBEAT_SECONDS` / `CHAT_MAX_TITLE_CHARS` | no | `60` / `600` / `15` / `200`. See [docs/chat.md](docs/chat.md). |
 | `S3_ALLOWED_SOURCES` | for connectors | Comma-separated buckets or `bucket/prefix/` scopes connectors may read. Empty: connectors are off (`503 connectors_not_configured`). |
-| `S3_REGION` / `S3_ENDPOINT_URL` / `S3_ADDRESSING_STYLE` | no | Bucket region; server-side endpoint override for MinIO (`scheme://host[:port]` only, never from the browser); `auto`. |
+| `S3_REGION` / `S3_ENDPOINT_URL` / `S3_ADDRESSING_STYLE` | no | Bucket region; server-side endpoint override for a local emulator (`scheme://host[:port]` only, never from the browser); `auto`. |
 | `S3_MAX_OBJECT_BYTES` / `S3_MAX_OBJECTS_PER_SYNC` / `S3_LIST_PAGE_SIZE` | no | `20971520` / `10000` / `1000`. |
 | `S3_CONNECT_TIMEOUT_SECONDS` / `S3_READ_TIMEOUT_SECONDS` / `S3_MAX_ATTEMPTS` | no | `10` / `60` / `3`. |
 | `CONNECTOR_SYNC_CONCURRENCY` / `CONNECTOR_SYNC_MAX_ATTEMPTS` / `CONNECTOR_SYNC_RETRY_BACKOFF_SECONDS` | no | `1` / `3` / `30`. See [docs/connectors.md](docs/connectors.md#configuration). |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_PROFILE` / `AWS_REGION` | for connectors | Worker credentials through the standard AWS chain; passed to the worker only, never stored or returned. Empty values are ignored. |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` / `S3_LOCAL_BUCKET` | `s3-local` profile only | Local MinIO administrator and sample bucket. |
+| `S3_LOCAL_BUCKET` / `S3_LOCAL_PORT` | `s3-local` profile only | Sample bucket and port of the local emulator. |
 
 ## Testing
 
@@ -411,8 +411,8 @@ RUN_LLM_SMOKE_TESTS=1 GEMINI_API_KEY=… uv run pytest -m live_llm -s
 #### S3 smoke tests
 
 The connector tests use moto (an in-process S3 emulator). `tests/test_s3_smoke.py` runs the
-real worker over HTTP against MinIO or a real bucket; it is skipped unless
-`RUN_S3_SMOKE_TESTS=1`, and CI runs it against MinIO. See
+real worker over HTTP against the local emulator or a real bucket; it is skipped unless
+`RUN_S3_SMOKE_TESTS=1`, and CI runs it against the emulator. See
 [docs/s3-smoke-tests.md](docs/s3-smoke-tests.md):
 
 ```bash
@@ -469,7 +469,7 @@ npm run build                   # production build into dist/
 
 CI runs all of the above (except the real-model and real-provider smoke tests) on every push
 to `main` and every pull request, plus `alembic check`, Docker Compose config validation
-(with and without the `s3-local` profile) and the S3 smoke tests against MinIO.
+(with and without the `s3-local` profile) and the S3 smoke tests against the local emulator.
 
 ## Current limitations
 
@@ -505,7 +505,7 @@ to `main` and every pull request, plus `alembic check`, Docker Compose config va
   rename and delete every conversation. Conversations are not private between people, and
   deduplication is global.
   Do not expose the stack to the public internet.
-- **S3 connectors have not been run against real Amazon S3**, only against moto and MinIO.
+- **S3 connectors have not been run against real Amazon S3**, only against moto (in process and as an HTTP server).
   IAM policies, regions and real ETag/versioning behaviour are untested. Every sync lists
   the whole prefix (no S3 event notifications), deletions in S3 show up on the next
   successful sync, and a changed document is briefly missing from search while it is
@@ -534,7 +534,7 @@ to `main` and every pull request, plus `alembic check`, Docker Compose config va
 | 3. Retrieval | Semantic, bilingual keyword and hybrid search, search API and UI, retrieval evaluation | ✅ Done |
 | 4. Chat | Grounded, streamed answers with citations, conversations, chat UI, answer evaluation harness | ✅ Implemented (real-model run pending an API key) |
 | 4.1 Multi-model | Gemini and Ollama providers, model catalog, per-question model selector | ✅ Implemented (real-provider runs pending keys and an Ollama server) |
-| 5. S3 connectors | Amazon S3 connectors, incremental scheduled sync, Connectors UI, MinIO profile | ✅ Implemented (emulator-verified; real AWS run pending) |
+| 5. S3 connectors | Amazon S3 connectors, incremental scheduled sync, Connectors UI, local S3 emulator profile | ✅ Implemented (emulator-verified; real AWS run pending) |
 | Later | Evaluation UI and answer review; production images, AWS infrastructure, authentication, monitoring | 🕒 Planned |
 
 ## License

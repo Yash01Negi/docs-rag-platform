@@ -7,7 +7,7 @@
 # Frontend: http://localhost:5173   API: http://localhost:8000/api/v1/health
 #
 # S3 connectors (Phase 5) read from Amazon S3 with the worker's AWS credentials (see
-# docs/s3-setup.md). To try them without AWS, start the optional MinIO emulator:
+# docs/s3-setup.md). To try them without AWS, start the optional local S3 emulator:
 #
 #   docker compose --profile s3-local up --build
 #
@@ -209,43 +209,37 @@ services:
         condition: service_healthy
 
   # --- Optional S3 emulator (profile "s3-local"); not needed for Amazon S3 -------------------
-  # MinIO speaks the S3 API, so the connector code path is the same as with AWS. Point the
-  # worker at it with S3_ENDPOINT_URL=http://minio:9000 (see docs/s3-setup.md). Local testing
-  # only: the console and API are bound to 127.0.0.1.
-  minio:
+  # moto's standalone server speaks the S3 API over HTTP, so the connector code path is the
+  # same as with AWS. Point the API and worker at it with S3_ENDPOINT_URL=http://s3-emulator:9000
+  # (see docs/s3-setup.md). Local testing only: bound to 127.0.0.1, objects kept in memory
+  # (a restart empties it; s3-setup refills the samples), and it does not enforce IAM.
+  s3-emulator:
     profiles: ["s3-local"]
-    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-yashrag-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+    build:
+      context: ./infra/s3-local
+    image: yashrag-s3-emulator:dev
     ports:
-      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
-      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
-    volumes:
-      - minio-data:/data
+      - "127.0.0.1:${S3_LOCAL_PORT:-9000}:9000"
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/moto-api/')"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  # One-off job: creates the sample bucket, uploads the sample documents and creates a
-  # read-only user for the worker (least privilege, like the IAM policy in docs/s3-setup.md).
-  minio-setup:
+  # One-off job: creates the versioned sample bucket and uploads the sample documents.
+  s3-setup:
     profiles: ["s3-local"]
-    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
-    entrypoint: ["/bin/sh", "/setup/setup.sh"]
+    build:
+      context: ./infra/s3-local
+    image: yashrag-s3-emulator:dev
+    command: ["python", "/setup/seed.py"]
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-yashrag-admin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      S3_ENDPOINT_URL: http://s3-emulator:9000
       S3_LOCAL_BUCKET: ${S3_LOCAL_BUCKET:-yashrag-local}
-      S3_LOCAL_READER_ACCESS_KEY: ${AWS_ACCESS_KEY_ID:-}
-      S3_LOCAL_READER_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     volumes:
       - ./infra/s3-local:/setup:ro
     depends_on:
-      minio:
+      s3-emulator:
         condition: service_healthy
     restart: "no"
 
@@ -255,5 +249,3 @@ volumes:
   uploads:
   # Hugging Face cache with the BGE-M3 weights; survives container rebuilds.
   model-cache:
-  # Objects of the optional MinIO emulator (profile s3-local).
-  minio-data:

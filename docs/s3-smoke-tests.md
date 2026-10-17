@@ -2,17 +2,18 @@
 
 The normal test suite exercises connectors against **moto**, an in-process S3 emulator, with
 the real boto3 client, the real worker and a real PostgreSQL database. This page covers the
-opt-in smoke test that goes over HTTP to a running S3 API: a local emulator such as MinIO,
-or a real Amazon S3 bucket.
+opt-in smoke test that goes over HTTP to a running S3 API: the local emulator from the
+`s3-local` Compose profile, or a real Amazon S3 bucket.
 
 | What | Talks to | Proves | Runs |
 | --- | --- | --- | --- |
 | `tests/test_connector_*.py` | moto (in process) | Sync semantics, queue, API, safety rules | Every `pytest` run and CI |
-| `tests/test_s3_smoke.py` with MinIO | MinIO over HTTP | The same code over a real network connection to an independent S3 implementation, with a read-only user and pagination | CI job "S3 smoke (MinIO emulator)"; locally on request |
+| `tests/test_s3_smoke.py` with the local emulator | moto's standalone server in a container, over HTTP | The same code over a real network connection, with request signing, pagination and the Compose emulator image | CI job "S3 smoke (local S3 emulator)"; locally on request |
 | `tests/test_s3_smoke.py` with Amazon S3 | AWS | Credentials, IAM policy, region and real S3 behaviour (ETags, versioning) | Only when you run it yourself |
 
 **Passing against an emulator is not the same as working against AWS.** Emulators accept
-requests that AWS might refuse (IAM conditions, regions, signature details) and produce
+requests that AWS might refuse (the local emulator does not enforce IAM at all; regions and
+signature details are checked loosely) and produce
 different ETags and version IDs. As of Phase 5, the connector has **not** been run against
 real Amazon S3.
 
@@ -20,17 +21,16 @@ The test is skipped unless `RUN_S3_SMOKE_TESTS=1`. It needs a migrated test data
 (`TEST_DATABASE_URL`, as for the integration tests) but no embedding model: it uses the fake
 embedding provider.
 
-## Against MinIO
+## Against the local emulator
 
-Start MinIO (the Compose profile from [s3-setup.md](s3-setup.md), or any MinIO), then from
-`backend/`:
+Start the emulator (the `s3-local` Compose profile from [s3-setup.md](s3-setup.md), or
+`docker compose --profile s3-local up -d s3-emulator s3-setup`), then from `backend/`:
 
 ```bash
 RUN_S3_SMOKE_TESTS=1 \
 S3_SMOKE_BUCKET=yashrag-local S3_SMOKE_WRITE=1 \
 S3_ENDPOINT_URL=http://127.0.0.1:9000 S3_REGION=us-east-1 \
-AWS_ACCESS_KEY_ID=yashrag-reader AWS_SECRET_ACCESS_KEY=… \
-S3_SMOKE_WRITER_ACCESS_KEY_ID=yashrag-admin S3_SMOKE_WRITER_SECRET_ACCESS_KEY=… \
+AWS_ACCESS_KEY_ID=local-test AWS_SECRET_ACCESS_KEY=local-test \
 TEST_DATABASE_URL=postgresql+psycopg://… \
 uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
 ```
@@ -45,10 +45,10 @@ With `S3_SMOKE_WRITE=1` the test creates objects under a random prefix
    document and removes one; the old text is no longer found.
 4. Deleting the connector removes its documents.
 
-It deletes the objects it created when it finishes. The connector runs with
-`AWS_ACCESS_KEY_ID` (the read-only user); the test's own writes use the
-`S3_SMOKE_WRITER_*` keys (any user that can write; without them it uses the same
-credentials as the connector).
+It deletes the objects it created when it finishes. The connector uses the normal AWS
+credentials; `S3_SMOKE_WRITER_ACCESS_KEY_ID` and `S3_SMOKE_WRITER_SECRET_ACCESS_KEY` give the
+test's own writes separate keys, so on a real bucket the connector can run with read-only
+credentials.
 
 Read-only mode (no `S3_SMOKE_WRITE`): set `S3_SMOKE_PREFIX` to a prefix that already holds
 supported documents, for example `handbook/` in the sample bucket. The test imports them,
@@ -80,7 +80,7 @@ under `yashrag-smoke/`).
 
 ## Manual end-to-end check in the UI
 
-With the stack running (MinIO profile or real S3):
+With the stack running (`s3-local` profile or real S3):
 
 1. Open **Connectors**, add a connector for the allowed bucket and prefix, and wait for the
    first sync to show **Synced** with the expected counts.
@@ -88,7 +88,8 @@ With the stack running (MinIO profile or real S3):
    S3 location, ETag and version.
 3. Ask a question on **Chat** that one of the files answers; the citation opens the
    imported document.
-4. Replace one object and delete another in the bucket, press **Sync now**, and check that
+4. Replace one object and delete another in the bucket (the AWS CLI commands in
+   [s3-setup.md](s3-setup.md) work for the emulator), press **Sync now**, and check that
    the counts show one updated and one removed, and that search reflects the change.
 5. Stop the worker while a sync runs (`docker compose stop worker`), start it again, and
    check that the sync completes without duplicate documents.

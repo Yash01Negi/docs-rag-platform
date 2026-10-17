@@ -6,9 +6,9 @@ objects under it, imports PDF, Markdown and text files through the same ingestio
 as uploads, and on every later sync imports new objects, re-indexes changed ones and
 removes documents whose objects were deleted. Uploaded documents are never touched.
 
-- Setup (credentials, IAM policy, MinIO): [s3-setup.md](s3-setup.md)
+- Setup (credentials, IAM policy, local emulator): [s3-setup.md](s3-setup.md)
 - HTTP API: [connectors-api.md](connectors-api.md)
-- Smoke tests against MinIO or a real bucket: [s3-smoke-tests.md](s3-smoke-tests.md)
+- Smoke tests against the local emulator or a real bucket: [s3-smoke-tests.md](s3-smoke-tests.md)
 - Why it works this way: [ADR 0011](decisions/0011-s3-sync-and-deletion.md)
 
 > **Local development only.** YashRAG has no authentication. Anyone who can reach the API
@@ -22,7 +22,7 @@ flowchart LR
     ui["Connectors page"] -- "/api/v1/connectors" --> api["API"]
     api -- "connectors · sync runs" --> db[("PostgreSQL")]
     worker["Worker"] -- "schedule · claim · lease" --> db
-    worker -- "ListObjectsV2 · GetObject (If-Match)" --> s3[("Amazon S3<br/>or MinIO")]
+    worker -- "ListObjectsV2 · GetObject (If-Match)" --> s3[("Amazon S3<br/>or local emulator")]
     worker -- "store file · enqueue ingestion job" --> db
     worker -- "extract · chunk · embed" --> db
 ```
@@ -177,7 +177,7 @@ YashRAG only ever reads from S3.
 | --- | --- | --- |
 | `S3_ALLOWED_SOURCES` | empty | Comma-separated `bucket` or `bucket/prefix/`. Required for connectors |
 | `S3_REGION` | unset | Region of the buckets; unset uses `AWS_REGION` / `AWS_DEFAULT_REGION` / the profile |
-| `S3_ENDPOINT_URL` | unset | Server-side endpoint override for MinIO or another emulator |
+| `S3_ENDPOINT_URL` | unset | Server-side endpoint override for a local emulator |
 | `S3_ADDRESSING_STYLE` | `auto` | `auto`, `path` or `virtual` (path is used automatically with an endpoint override) |
 | `S3_MAX_OBJECT_BYTES` | `20971520` | Largest object imported |
 | `S3_MAX_OBJECTS_PER_SYNC` | `10000` | Listing larger than this fails (`too_many_objects`) and deletes nothing |
@@ -192,7 +192,7 @@ YashRAG only ever reads from S3.
 ## Known limitations
 
 - **Verified against emulators only.** The connector has been tested with moto (in-process
-  and as an HTTP server) and, in CI, with MinIO. No request has been made to real Amazon
+  and as an HTTP server, also in CI). No request has been made to real Amazon
   S3 during development. See [s3-smoke-tests.md](s3-smoke-tests.md) for how to check a
   real bucket.
 - Every sync lists the whole prefix; there is no S3 event notification (SQS/EventBridge)

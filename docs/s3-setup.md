@@ -1,7 +1,7 @@
 # Setting up S3 connectors
 
 This guide sets up the backend so the Connectors page can import from Amazon S3, or from a
-local MinIO emulator for trying it without AWS. How syncing behaves:
+local S3 emulator for trying it without AWS. How syncing behaves:
 [connectors.md](connectors.md).
 
 > **Local development only.** YashRAG has no authentication: anyone who can reach it can
@@ -109,19 +109,18 @@ Restart the API and the worker (`docker compose up -d --force-recreate backend w
 then open <http://localhost:5173/connectors>, add a connector for the same bucket and
 prefix, and watch the first sync.
 
-## Trying it without AWS: MinIO
+## Trying it without AWS: the local S3 emulator
 
-The optional `s3-local` Compose profile starts [MinIO](https://min.io/) on `127.0.0.1`
-and fills a versioned bucket with three sample documents (English and Japanese) under
-`handbook/`. A one-off job creates a read-only MinIO user for the worker with the same two
-permissions as the IAM policy above.
+The optional `s3-local` Compose profile starts a local S3 emulator on `127.0.0.1:9000`
+([moto](https://github.com/getmoto/moto)'s standalone server, built from
+`infra/s3-local/Dockerfile`) and fills a versioned bucket with three sample documents
+(English and Japanese) under `handbook/`.
 
 ```bash
-# .env (local-only values you choose; MINIO_ROOT_PASSWORD needs 8+ characters)
-MINIO_ROOT_PASSWORD=choose-a-local-password
-AWS_ACCESS_KEY_ID=yashrag-reader
-AWS_SECRET_ACCESS_KEY=choose-a-reader-secret
-S3_ENDPOINT_URL=http://minio:9000
+# .env (local-only values; the emulator accepts any non-empty keys)
+AWS_ACCESS_KEY_ID=local-test
+AWS_SECRET_ACCESS_KEY=local-test
+S3_ENDPOINT_URL=http://s3-emulator:9000
 S3_REGION=us-east-1
 S3_ALLOWED_SOURCES=yashrag-local
 ```
@@ -130,20 +129,32 @@ S3_ALLOWED_SOURCES=yashrag-local
 docker compose --profile s3-local up --build
 ```
 
-Then add a connector for bucket `yashrag-local`, prefix `handbook/`. The MinIO console is at
-<http://127.0.0.1:9001> (log in with `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD`); upload,
-replace or delete files there and press **Sync now** to see changes picked up.
+Then add a connector for bucket `yashrag-local`, prefix `handbook/`. To see changes picked
+up, change the bucket from your machine (for example with the AWS CLI) and press
+**Sync now**:
+
+```bash
+export AWS_ACCESS_KEY_ID=local-test AWS_SECRET_ACCESS_KEY=local-test AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://127.0.0.1:9000 s3 cp notes.md s3://yashrag-local/handbook/notes.md
+aws --endpoint-url http://127.0.0.1:9000 s3 rm s3://yashrag-local/handbook/security.md
+aws --endpoint-url http://127.0.0.1:9000 s3 ls s3://yashrag-local/handbook/
+```
 
 Notes:
 
 - `S3_ENDPOINT_URL` is a server-side setting only. It must be `http(s)://host[:port]`
   without credentials or a path; the browser can never choose an endpoint. Leave it empty
   for Amazon S3.
-- When you switch back to Amazon S3, clear `S3_ENDPOINT_URL` and replace the MinIO keys.
-- The MinIO images are pinned community releases from MinIO's registry on `quay.io` (the
-  Docker Hub repository is no longer available, and MinIO has stopped publishing new
-  community images). Treat the profile as a testing aid only. CI runs the smoke tests
-  against the same images.
+- The emulator is a testing aid, not storage: it keeps objects **in memory**, so restarting
+  it empties the bucket (`s3-setup` uploads the samples again on the next `up`). The next
+  sync after that removes documents whose objects are gone, exactly as it would on S3.
+- It **does not enforce IAM**: any keys work and every bucket is readable. Use a real
+  bucket with the policy above to check permissions
+  ([s3-smoke-tests.md](s3-smoke-tests.md#against-amazon-s3)).
+- MinIO was the original choice for this profile, but its community images can no longer
+  be pulled from Docker Hub or quay.io, so the profile uses moto, which is also what the
+  test suite uses.
+- When you switch back to Amazon S3, clear `S3_ENDPOINT_URL` and replace the local keys.
 - Running the API and worker on the host instead of in Docker? Use
   `S3_ENDPOINT_URL=http://127.0.0.1:9000`.
 
@@ -155,7 +166,7 @@ Notes:
 | `access_denied` | The policy does not allow `s3:ListBucket` on the bucket (with this prefix) or `s3:GetObject` on its objects |
 | `bucket_not_found` | Wrong bucket name, or the bucket is in another account |
 | `wrong_region` | `S3_REGION` does not match the bucket's region |
-| `s3_unreachable` | No network route to S3 (proxy, DNS, or MinIO not running) |
+| `s3_unreachable` | No network route to S3 (proxy, DNS, or the local emulator not running) |
 | `source_not_allowed` | The connector's bucket or prefix was removed from `S3_ALLOWED_SOURCES` |
 | `too_many_objects` | More than `S3_MAX_OBJECTS_PER_SYNC` objects under the prefix; narrow the prefix or raise the limit |
 

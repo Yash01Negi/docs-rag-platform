@@ -54,7 +54,7 @@ flowchart LR
     anthropic(["Anthropic API"])
     gemini(["Gemini API"])
     ollama(["Ollama<br/>(local)"])
-    s3(["Amazon S3<br/>(or MinIO)"])
+    s3(["Amazon S3<br/>(or local emulator)"])
 
     user --> shell
     user --> docsui
@@ -248,9 +248,9 @@ flowchart LR
 - `frontend` proxies `/api` to `http://backend:8000`.
 - Connector settings (`S3_*`) go to both the API and the worker; AWS credentials go to the
   worker only.
-- The optional `s3-local` profile adds `minio` (S3 emulator, data in the `minio-data`
-  volume) and `minio-setup` (a one-off job that creates the sample bucket and a read-only
-  user from `infra/s3-local/`). Without the profile, neither starts.
+- The optional `s3-local` profile adds `s3-emulator` (moto's standalone S3 server, built
+  from `infra/s3-local/`, objects in memory, no IAM) and `s3-setup` (a one-off job that
+  creates the versioned sample bucket). Without the profile, neither starts.
 - All ports are published on `127.0.0.1` only.
 
 ### CI (`.github/workflows/ci.yml`)
@@ -263,12 +263,12 @@ Four parallel jobs on every push to `main` and every pull request:
    pytest suite (unit and integration tests, with the fake embedding provider). The
    real-model smoke test is skipped.
 2. **Frontend**: `npm ci`, oxlint (warnings fail the job), `tsc -b`, Vitest, `vite build`.
-3. **S3 smoke (MinIO emulator)**: starts MinIO, creates a versioned bucket and a read-only
-   user with `infra/s3-local/setup.sh`, and runs `tests/test_s3_smoke.py` (new, changed and
+3. **S3 smoke (local S3 emulator)**: builds and starts the `s3-local` emulator image, seeds
+   it with `infra/s3-local/seed.py`, and runs `tests/test_s3_smoke.py` (new, changed and
    deleted objects; then read-only import of the sample documents) through the real worker
    over HTTP. No AWS account is involved.
 4. **Compose**: `docker compose config` validation, including that the worker service is
-   defined, and that the `s3-local` profile adds only `minio` and `minio-setup`.
+   defined, and that the `s3-local` profile adds only `s3-emulator` and `s3-setup`.
 
 There is no deployment step.
 

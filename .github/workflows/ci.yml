@@ -99,7 +99,7 @@ jobs:
         run: npm run build
 
   s3-smoke:
-    name: S3 smoke (MinIO emulator)
+    name: S3 smoke (local S3 emulator)
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -120,13 +120,15 @@ jobs:
           --health-retries 10
     env:
       # Throwaway credentials for ephemeral CI containers only. No AWS account is used:
-      # this job talks to a local MinIO emulator, never to Amazon S3.
+      # this job talks to the local S3 emulator (moto server), never to Amazon S3.
       DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
       TEST_DATABASE_URL: postgresql+psycopg://yashrag:ci-only-password@localhost:5432/yashrag_test
-      MINIO_ROOT_USER: ci-minio-admin
-      MINIO_ROOT_PASSWORD: ci-only-minio-password
-      MINIO_IMAGE: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
-      MC_IMAGE: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+      RUN_S3_SMOKE_TESTS: "1"
+      S3_SMOKE_BUCKET: yashrag-local
+      S3_ENDPOINT_URL: http://127.0.0.1:9000
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ci-emulator-key
+      AWS_SECRET_ACCESS_KEY: ci-emulator-secret
     steps:
       - uses: actions/checkout@v7
 
@@ -140,61 +142,35 @@ jobs:
       - name: Install dependencies (from uv.lock)
         run: uv sync --locked
 
-      # A service container cannot pass MinIO its "server" command, so start it directly.
-      - name: Start MinIO
-        run: |
-          docker run -d --name minio -p 127.0.0.1:9000:9000 \
-            -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD "$MINIO_IMAGE" server /data
-          for _ in $(seq 1 30); do
-            curl -fsS http://127.0.0.1:9000/minio/health/ready && exit 0
-            sleep 2
-          done
-          docker logs minio
-          exit 1
-
-      # The same script as the s3-local Compose profile: a versioned bucket with the sample
-      # documents and a read-only user with the least-privilege policy from docs/s3-setup.md.
-      - name: Create the bucket and a read-only user
+      # The same image and seed script as the s3-local Compose profile.
+      - name: Build and start the S3 emulator
         working-directory: .
         run: |
-          docker run --rm --network host --entrypoint /bin/sh \
-            -e MINIO_URL=http://127.0.0.1:9000 -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
-            -e S3_LOCAL_BUCKET=yashrag-smoke \
-            -e S3_LOCAL_READER_ACCESS_KEY=ci-reader \
-            -e S3_LOCAL_READER_SECRET_KEY=ci-only-reader-secret \
-            -v "$PWD/infra/s3-local:/setup:ro" "$MC_IMAGE" /setup/setup.sh
+          docker build -t yashrag-s3-emulator:ci infra/s3-local
+          docker run -d --name s3-emulator -p 127.0.0.1:9000:9000 yashrag-s3-emulator:ci
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:9000/moto-api/ && break
+            sleep 1
+          done
+          docker run --rm --network host -e S3_ENDPOINT_URL -e S3_LOCAL_BUCKET=yashrag-local \
+            -v "$PWD/infra/s3-local:/setup:ro" yashrag-s3-emulator:ci python /setup/seed.py
 
       - name: Apply migrations
         run: uv run alembic upgrade head
 
-      # The connector runs with the read-only user; the test's own writes use the admin keys.
       - name: Smoke test (new, changed and deleted objects)
         env:
-          RUN_S3_SMOKE_TESTS: "1"
-          S3_SMOKE_BUCKET: yashrag-smoke
           S3_SMOKE_WRITE: "1"
-          S3_ENDPOINT_URL: http://127.0.0.1:9000
-          S3_REGION: us-east-1
-          AWS_ACCESS_KEY_ID: ci-reader
-          AWS_SECRET_ACCESS_KEY: ci-only-reader-secret
-          S3_SMOKE_WRITER_ACCESS_KEY_ID: ci-minio-admin
-          S3_SMOKE_WRITER_SECRET_ACCESS_KEY: ci-only-minio-password
         run: uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
 
       - name: Smoke test (read-only, sample documents)
         env:
-          RUN_S3_SMOKE_TESTS: "1"
-          S3_SMOKE_BUCKET: yashrag-smoke
           S3_SMOKE_PREFIX: handbook/
-          S3_ENDPOINT_URL: http://127.0.0.1:9000
-          S3_REGION: us-east-1
-          AWS_ACCESS_KEY_ID: ci-reader
-          AWS_SECRET_ACCESS_KEY: ci-only-reader-secret
         run: uv run pytest tests/test_s3_smoke.py -m s3_smoke -v
 
-      - name: MinIO logs
+      - name: Emulator logs
         if: failure()
-        run: docker logs minio
+        run: docker logs s3-emulator
 
   compose:
     name: Docker Compose config
@@ -208,8 +184,7 @@ jobs:
           docker compose config --quiet
           docker compose config --services | sort | tr '\n' ' ' | tee /dev/stderr \
             | grep -q "backend db frontend migrate worker"
-          # The optional emulator profile adds only MinIO and its setup job.
-          MINIO_ROOT_PASSWORD=ci-only-minio-password docker compose --profile s3-local config --quiet
-          MINIO_ROOT_PASSWORD=ci-only-minio-password docker compose --profile s3-local config --services \
-            | sort | tr '\n' ' ' | tee /dev/stderr \
-            | grep -q "backend db frontend migrate minio minio-setup worker"
+          # The optional emulator profile adds only the S3 emulator and its seed job.
+          docker compose --profile s3-local config --quiet
+          docker compose --profile s3-local config --services | sort | tr '\n' ' ' | tee /dev/stderr \
+            | grep -q "backend db frontend migrate s3-emulator s3-setup worker"

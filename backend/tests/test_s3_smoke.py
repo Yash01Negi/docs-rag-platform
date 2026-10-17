@@ -1,4 +1,4 @@
-"""Opt-in smoke test against a real S3 API: MinIO (or another emulator) or Amazon S3.
+"""Opt-in smoke test over HTTP: the local S3 emulator (s3-local profile) or Amazon S3.
 
 Skipped unless RUN_S3_SMOKE_TESTS=1. It runs the real S3 client over HTTP, the worker and
 the database end to end, then checks the documents through the API.
