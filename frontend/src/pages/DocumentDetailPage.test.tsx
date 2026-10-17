@@ -128,4 +128,40 @@ describe('DocumentDetailPage', () => {
     )
     expect(await screen.findByRole('alert')).toHaveTextContent('This document does not exist.')
   })
+
+  it('shows the S3 source of an imported document', async () => {
+    renderDetail(
+      makeDetail({
+        source_type: 's3',
+        source: {
+          connector_id: 'conn-1',
+          connector_name: 'Team handbook',
+          provider: 's3',
+          bucket: 'team-docs',
+          object_key: 'handbook/policy.pdf',
+          uri: 's3://team-docs/handbook/policy.pdf',
+          etag: '9b2cf535f27731c974343645a3985328-3',
+          version_id: null,
+          size_bytes: 2048,
+          last_modified: '2026-10-17T07:00:00Z',
+          last_synced_at: '2026-10-17T08:00:00Z',
+        },
+      }),
+    )
+    const source = await screen.findByRole('region', { name: 'Source: Amazon S3' })
+    expect(within(source).getByText('s3://team-docs/handbook/policy.pdf')).toBeInTheDocument()
+    expect(within(source).getByText('9b2cf535f27731c974343645a3985328-3')).toBeInTheDocument()
+    expect(within(source).getByText('— (bucket not versioned)')).toBeInTheDocument()
+    expect(within(source).getByRole('link', { name: 'Connector: Team handbook' })).toHaveAttribute(
+      'href',
+      '/connectors/conn-1',
+    )
+    expect(screen.getByText('Imported')).toBeInTheDocument()
+  })
+
+  it('has no source section for uploads', async () => {
+    renderDetail(makeDetail())
+    expect(await screen.findByText('Uploaded')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Source: Amazon S3' })).not.toBeInTheDocument()
+  })
 })

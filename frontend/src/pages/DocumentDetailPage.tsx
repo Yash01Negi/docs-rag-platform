@@ -15,6 +15,7 @@ import {
   reindexDocument,
   retryDocument,
   type DocumentDetail,
+  type DocumentSourceInfo,
 } from '../lib/api'
 import {
   FILE_TYPE_LABELS,
@@ -117,7 +118,7 @@ function Metadata({ document }: { document: DocumentDetail }) {
     ['Pages', document.page_count?.toString() ?? '—'],
     ['Language', languageLabel(document.language)],
     ['Chunks', document.chunk_count.toString()],
-    ['Uploaded', formatDateTime(document.created_at)],
+    [document.source_type === 's3' ? 'Imported' : 'Uploaded', formatDateTime(document.created_at)],
     ['Indexed at', formatDateTime(document.processed_at)],
     [
       'Embedding model',
@@ -137,6 +138,52 @@ function Metadata({ document }: { document: DocumentDetail }) {
         </div>
       ))}
     </dl>
+  )
+}
+
+function SourceDetails({ source }: { source: DocumentSourceInfo }) {
+  const rows: [string, string][] = [
+    ['Object', source.object_key],
+    ['Bucket', source.bucket],
+    ['ETag', source.etag ?? '—'],
+    ['Version ID', source.version_id ?? '— (bucket not versioned)'],
+    ['Object size', source.size_bytes === null ? '—' : formatBytes(source.size_bytes)],
+    ['Last modified in S3', formatDateTime(source.last_modified)],
+    ['Last synced', formatDateTime(source.last_synced_at)],
+  ]
+  return (
+    <section
+      aria-labelledby="source-heading"
+      className="rounded-xl border border-slate-200 bg-white shadow-sm"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-5 py-4">
+        <h3 id="source-heading" className="text-sm font-semibold text-slate-900">
+          Source: Amazon S3
+        </h3>
+        <Link
+          to={`/connectors/${source.connector_id}`}
+          className="rounded-sm text-sm font-medium text-indigo-700 hover:underline focus-visible:outline-2 focus-visible:outline-indigo-600"
+        >
+          Connector: {source.connector_name}
+        </Link>
+      </div>
+      <div className="px-5 py-2">
+        <p className="py-2 font-mono text-sm break-all text-slate-800">{source.uri}</p>
+        <dl className="divide-y divide-slate-100 text-sm">
+          {rows.map(([label, value]) => (
+            <div key={label} className="grid grid-cols-3 gap-4 py-2.5">
+              <dt className="text-slate-500">{label}</dt>
+              <dd className="col-span-2 font-medium break-all text-slate-900">{value}</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="py-2 text-xs text-slate-500">
+          This document is kept in sync with its S3 object. If you delete it here, the next sync
+          imports it again; remove the object from the bucket (or delete the connector) to remove
+          it for good.
+        </p>
+      </div>
+    </section>
   )
 }
 
@@ -350,6 +397,8 @@ export default function DocumentDetailPage() {
           )}
         </section>
       </div>
+
+      {document.source && <SourceDetails source={document.source} />}
 
       <section
         aria-labelledby="chunks-heading"

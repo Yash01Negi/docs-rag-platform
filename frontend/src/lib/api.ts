@@ -27,6 +27,8 @@ export type DocumentStatus = 'pending' | 'processing' | 'completed' | 'failed'
 export type FileType = 'pdf' | 'markdown' | 'text'
 export type Language = 'ja' | 'en' | 'mixed' | 'unknown'
 
+export type DocumentSource = 'upload' | 's3'
+
 export interface DocumentSummary {
   id: string
   filename: string
@@ -35,6 +37,7 @@ export interface DocumentSummary {
   size_bytes: number
   language: Language | null
   status: DocumentStatus
+  source_type: DocumentSource
   chunk_count: number
   created_at: string
   updated_at: string
@@ -64,6 +67,22 @@ export interface DocumentDetail extends DocumentSummary {
   embedding_dimension: number | null
   processed_at: string | null
   latest_job: JobSummary | null
+  /** The S3 object behind an imported document; null for uploads. */
+  source: DocumentSourceInfo | null
+}
+
+export interface DocumentSourceInfo {
+  connector_id: string
+  connector_name: string
+  provider: string
+  bucket: string
+  object_key: string
+  uri: string
+  etag: string | null
+  version_id: string | null
+  size_bytes: number | null
+  last_modified: string | null
+  last_synced_at: string | null
 }
 
 export interface Page<T> {
@@ -336,4 +355,160 @@ export function searchDocuments(body: SearchRequest, signal?: AbortSignal): Prom
 
 export function fetchSearchOptions(): Promise<SearchOptions> {
   return request<SearchOptions>('/api/v1/search/options')
+}
+
+// --- Connectors (Phase 5) -----------------------------------------------------------------
+// AWS credentials and endpoints are configured on the backend only; no request or response
+// here ever carries them.
+
+export type SyncRunStatus = 'pending' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled'
+export type SyncTrigger = 'manual' | 'scheduled'
+
+export interface SyncRun {
+  id: string
+  connector_id: string
+  trigger: SyncTrigger
+  status: SyncRunStatus
+  attempts: number
+  max_attempts: number
+  cancel_requested: boolean
+  run_after: string
+  objects_scanned: number
+  documents_imported: number
+  documents_updated: number
+  documents_unchanged: number
+  documents_removed: number
+  objects_skipped: number
+  objects_failed: number
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface SyncFailure {
+  key: string
+  code: string
+  message: string
+  kind: 'failed' | 'skipped'
+}
+
+export interface SyncRunDetail extends SyncRun {
+  failures: SyncFailure[]
+}
+
+export interface Connector {
+  id: string
+  name: string
+  provider: 's3'
+  bucket: string
+  prefix: string
+  uri: string
+  enabled: boolean
+  sync_interval_minutes: number
+  next_sync_at: string | null
+  last_sync_started_at: string | null
+  last_sync_finished_at: string | null
+  last_success_at: string | null
+  last_sync_status: SyncRunStatus | null
+  last_error_code: string | null
+  last_error_message: string | null
+  document_count: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ConnectorDetail extends Connector {
+  failed_object_count: number
+  deleted_object_count: number
+  active_run: SyncRun | null
+  latest_run: SyncRun | null
+}
+
+export interface ConnectorOptions {
+  configured: boolean
+  allowed_sources: string[]
+  endpoint_override: boolean
+  supported_extensions: string[]
+  max_object_bytes: number
+  min_interval_minutes: number
+  max_interval_minutes: number
+}
+
+export interface ConnectorCreate {
+  name: string
+  bucket: string
+  prefix: string
+  sync_interval_minutes: number
+  enabled: boolean
+}
+
+export type ConnectorUpdate = Partial<Pick<ConnectorCreate, 'name' | 'sync_interval_minutes' | 'enabled'>>
+
+export interface SyncRequestResult {
+  created: boolean
+  run: SyncRun
+}
+
+const JSON_HEADERS = { 'Content-Type': 'application/json' }
+
+function connectorPath(id: string, suffix = ''): string {
+  return `/api/v1/connectors/${encodeURIComponent(id)}${suffix}`
+}
+
+export function fetchConnectorOptions(): Promise<ConnectorOptions> {
+  return request<ConnectorOptions>('/api/v1/connectors/options')
+}
+
+export function listConnectors(params: { limit: number; offset: number }): Promise<Page<Connector>> {
+  const query = new URLSearchParams({ limit: String(params.limit), offset: String(params.offset) })
+  return request<Page<Connector>>(`/api/v1/connectors?${query}`)
+}
+
+export function getConnector(id: string): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(connectorPath(id))
+}
+
+export function createConnector(body: ConnectorCreate): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(
+    '/api/v1/connectors',
+    { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) },
+    [201],
+  )
+}
+
+export function updateConnector(id: string, body: ConnectorUpdate): Promise<ConnectorDetail> {
+  return request<ConnectorDetail>(connectorPath(id), {
+    method: 'PATCH',
+    headers: JSON_HEADERS,
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteConnector(id: string): Promise<void> {
+  return request<void>(connectorPath(id), { method: 'DELETE' }, [204])
+}
+
+export function requestSync(id: string): Promise<SyncRequestResult> {
+  return request<SyncRequestResult>(connectorPath(id, '/sync'), { method: 'POST' }, [200, 202])
+}
+
+export function listSyncRuns(
+  id: string,
+  params: { limit: number; offset: number },
+): Promise<Page<SyncRun>> {
+  const query = new URLSearchParams({ limit: String(params.limit), offset: String(params.offset) })
+  return request<Page<SyncRun>>(connectorPath(id, `/sync-runs?${query}`))
+}
+
+export function getSyncRun(id: string, runId: string): Promise<SyncRunDetail> {
+  return request<SyncRunDetail>(connectorPath(id, `/sync-runs/${encodeURIComponent(runId)}`))
+}
+
+export function cancelSyncRun(id: string, runId: string): Promise<SyncRunDetail> {
+  return request<SyncRunDetail>(
+    connectorPath(id, `/sync-runs/${encodeURIComponent(runId)}/cancel`),
+    { method: 'POST' },
+  )
 }

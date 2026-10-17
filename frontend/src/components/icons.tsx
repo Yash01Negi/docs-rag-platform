@@ -116,3 +116,10 @@ export const SearchIcon = (props: IconProps) => (
     <path d="m20 20-3.5-3.5" />
   </Icon>
 )
+
+export const ConnectorsIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 8.5a4 4 0 0 1-.5 7.97" />
+    <path d="m9 15 3-3 3 3M12 12v9" />
+  </Icon>
+)
