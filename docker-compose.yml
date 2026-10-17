@@ -214,7 +214,7 @@ services:
   # only: the console and API are bound to 127.0.0.1.
   minio:
     profiles: ["s3-local"]
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: ["server", "/data", "--console-address", ":9001"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-yashrag-admin}
@@ -234,7 +234,7 @@ services:
   # read-only user for the worker (least privilege, like the IAM policy in docs/s3-setup.md).
   minio-setup:
     profiles: ["s3-local"]
-    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
     entrypoint: ["/bin/sh", "/setup/setup.sh"]
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-yashrag-admin}

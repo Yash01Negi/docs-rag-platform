@@ -140,9 +140,10 @@ Notes:
   without credentials or a path; the browser can never choose an endpoint. Leave it empty
   for Amazon S3.
 - When you switch back to Amazon S3, clear `S3_ENDPOINT_URL` and replace the MinIO keys.
-- The pinned MinIO images are the last community releases published to Docker Hub; MinIO
-  has since stopped publishing community images there, so treat the profile as a testing
-  aid only. CI runs the smoke tests against the same images.
+- The MinIO images are pinned community releases from MinIO's registry on `quay.io` (the
+  Docker Hub repository is no longer available, and MinIO has stopped publishing new
+  community images). Treat the profile as a testing aid only. CI runs the smoke tests
+  against the same images.
 - Running the API and worker on the host instead of in Docker? Use
   `S3_ENDPOINT_URL=http://127.0.0.1:9000`.
 
