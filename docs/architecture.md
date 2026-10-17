@@ -1,10 +1,11 @@
 # Architecture
 
-This document describes what exists after **Phase 4 (Conversational RAG)** and where
+This document describes what exists after **Phase 5 (S3 connectors)** and where
 planned components will fit. Anything marked *planned* is not implemented yet. The
 ingestion pipeline is described in detail in [ingestion-pipeline.md](ingestion-pipeline.md),
 search in [retrieval.md](retrieval.md), answers in [chat.md](chat.md) (protocol:
-[chat-api.md](chat-api.md); model providers: [llm-providers.md](llm-providers.md)).
+[chat-api.md](chat-api.md); model providers: [llm-providers.md](llm-providers.md)), and S3
+connectors in [connectors.md](connectors.md) (API: [connectors-api.md](connectors-api.md)).
 
 ## System overview
 
@@ -17,6 +18,7 @@ flowchart LR
         docsui["Documents UI<br/>upload · library · details"]
         searchui["Search UI<br/>modes · filters · result cards"]
         chatui["Chat UI<br/>history · streaming · citations"]
+        connui["Connectors UI<br/>list · form · sync history"]
     end
 
     subgraph backend["backend/ · FastAPI (Python 3.12)"]
@@ -30,16 +32,19 @@ flowchart LR
         chatapi["/conversations API<br/>CRUD · SSE answers"]
         chat["chat/<br/>history · sources · prompt<br/>citation filter · persistence"]
         llmp["llm/<br/>LLMProvider · registry · catalog<br/>Anthropic · Gemini · Ollama"]
+        connapi["/connectors API<br/>CRUD · sync · runs · cancel"]
     end
 
     subgraph workerp["Ingestion worker · python -m app.worker"]
         runner["Job runner<br/>claim · lease · retry · recover"]
         pipe["Extract → chunk → embed<br/>+ keyword terms (Sudachi)"]
         model["BAAI/bge-m3<br/>(sentence-transformers + PyTorch)"]
+        syncr["Sync scheduler + runner<br/>schedule · claim · lease · recover"]
+        engine["Sync engine<br/>list · compare · If-Match download · delete"]
     end
 
     subgraph data["PostgreSQL 17 + pgvector"]
-        pg[("documents · chunks<br/>vector(1024) + tsvector (GIN)<br/>ingestion_jobs<br/>conversations · messages<br/>message_citations")]
+        pg[("documents · chunks<br/>vector(1024) + tsvector (GIN)<br/>ingestion_jobs<br/>conversations · messages<br/>message_citations<br/>connectors · connector_sync_runs<br/>connector_objects")]
     end
 
     files[("Original files<br/>LocalFileStorage")]
@@ -49,13 +54,21 @@ flowchart LR
     anthropic(["Anthropic API"])
     gemini(["Gemini API"])
     ollama(["Ollama<br/>(local)"])
+    s3(["Amazon S3<br/>(or MinIO)"])
 
     user --> shell
     user --> docsui
     user --> searchui
     user --> chatui
-    shell & docsui & searchui & chatui -- "/api/*" --> mw
-    mw --> health & docsapi & searchapi & chatapi
+    user --> connui
+    shell & docsui & searchui & chatui & connui -- "/api/*" --> mw
+    mw --> health & docsapi & searchapi & chatapi & connapi
+    connapi --> pg
+    syncr -- "FOR UPDATE SKIP LOCKED" --> pg
+    syncr --> engine
+    engine -- "ListObjectsV2 · GetObject" --> s3
+    engine -- "store file · queue job" --> files
+    engine --> pg
     chatapi --> chat
     chat --> search
     chat --> pg
@@ -88,7 +101,7 @@ flowchart LR
 | `app/core/errors.py` | `ApiError` and exception handlers producing `{"error": {"code", "message", "request_id"}}` |
 | `app/core/limits.py` | Request body size limit (rejects oversized uploads with `413` before they are read) |
 | `app/db/session.py` | Async SQLAlchemy engine (psycopg 3 driver), session factory and `check_database()` |
-| `app/db/models.py` | ORM models and status enums for `documents`, `chunks` and `ingestion_jobs` |
+| `app/db/models.py` | ORM models and status enums for documents, chunks, ingestion jobs, conversations and connectors |
 | `app/api/v1/health.py` | `/health` and `/ready` endpoints |
 | `app/api/v1/documents.py`, `schemas.py` | Document management endpoints and their response models |
 | `app/services/documents.py` | Upload (spool, hash, validate, deduplicate, store, queue), listing, retry, reindex, delete |
@@ -100,7 +113,9 @@ flowchart LR
 | `app/llm/` | `LLMProvider` interface; Anthropic, Gemini and Ollama implementations; the provider registry and model catalog that validate each question's model choice ([ADR 0007](decisions/0007-llm-provider.md), [ADR 0010](decisions/0010-multiple-llm-providers.md), [llm-providers.md](llm-providers.md)) |
 | `app/chat/` | The answer pipeline: `ChatService` (history, retrieval, source selection, prompt, streaming, persistence), citation filter, token estimates, conversation queries ([chat.md](chat.md), [ADR 0008](decisions/0008-grounding-and-citations.md)) |
 | `app/api/v1/conversations.py` | Conversation endpoints and the Server-Sent Events stream ([chat-api.md](chat-api.md), [ADR 0009](decisions/0009-streaming-and-persistence.md)) |
-| `app/worker/` | Worker process: `run`, `prepare-model`, `healthcheck` and `rebuild-search-index` commands |
+| `app/connectors/` | S3 connectors: source validation and allowlist, the boto3 client wrapper with safe error mapping, the sync run queue (scheduling, leases, retries, recovery, cancellation), the sync engine, and the service behind the API ([connectors.md](connectors.md), [ADR 0011](decisions/0011-s3-sync-and-deletion.md)) |
+| `app/api/v1/connectors.py` | Connector and sync run endpoints ([connectors-api.md](connectors-api.md)) |
+| `app/worker/` | Worker process: `run` (ingestion jobs and connector syncs), `prepare-model`, `healthcheck` and `rebuild-search-index` commands |
 | `evaluation/` | Judged bilingual evaluation set, metrics, the evaluation harness and benchmarks ([evaluation/](evaluation/README.md)) |
 | `alembic/` | Migration environment; reads `DATABASE_URL` through the same `Settings` class |
 
@@ -170,6 +185,7 @@ PostgreSQL 17 with pgvector 0.8.1 (`pgvector/pgvector:0.8.1-pg17`). See
 | `0003_keyword_search` | `chunks.search_vector` (`tsvector`, GIN index) and `chunks.search_length`, backfilled for existing chunks |
 | `0004_conversations` | `conversations`, `messages` (questions and answers with status, grounding, provider, model, usage and timings) and `message_citations` (one row per passage given to the model), with foreign keys that cascade on conversation delete, CHECK constraints, and unique indexes for one streaming answer per conversation, one answer per question and one question per client idempotency key |
 | `0005_requested_model` | `messages.requested_provider` and `messages.requested_model`: the model the user chose for an answer, next to the provider and model that answered. Existing answers are backfilled from `provider` and `model` |
+| `0006_connectors` | `connectors` (bucket, prefix, schedule, last result; no credentials), `connector_sync_runs` (leased jobs; a partial unique index allows one queued or running run per connector), `connector_objects` (one row per object key: ETag, size, version ID, last-modified, status and document link, kept after deletion for audit), and `documents.source_type`. Content de-duplication becomes a partial unique index on uploads only. The downgrade refuses to run while imported documents exist |
 
 Columns and constraints are listed in [ingestion-pipeline.md](ingestion-pipeline.md#schema).
 There is deliberately no vector index: semantic search is exact, and
@@ -193,6 +209,8 @@ React 19 + TypeScript + Vite + Tailwind CSS v4, with React Router for navigation
 | `src/pages/SearchPage.tsx`, `src/components/search/*` | Search with mode and filters kept in the URL, result cards with highlights, scores and method ranks |
 | `src/lib/chat.ts`, `src/lib/chatState.ts` | Chat API client, SSE parser (`fetch` streaming), and the reducer that turns stream events into the answer view |
 | `src/pages/ChatPage.tsx`, `src/components/chat/*` | Conversation sidebar, streaming answers rendered as sanitized Markdown, citation buttons, cited and related sources with document links, stop and retry |
+| `src/lib/connectors.ts`, `src/components/connectors/*` | Connector form validation, labels and polling rules; the connector form and sync status badge |
+| `src/pages/ConnectorsPage.tsx`, `src/pages/ConnectorDetailPage.tsx` | Connector list and create form; detail with configuration, last sync, history with failures, sync now, cancel, pause/resume, edit and delete. Polls only while a sync is queued or running |
 | `src/pages/*` | Dashboard (live system status), and a placeholder for Evaluation |
 
 The Evaluation page is an explicit placeholder labelled "Coming in a later milestone". No
@@ -228,11 +246,16 @@ flowchart LR
   It is limited to 4 CPUs and 6 GB by default and gets 45 seconds to shut down gracefully.
   Model weights are downloaded at runtime, never at build time.
 - `frontend` proxies `/api` to `http://backend:8000`.
+- Connector settings (`S3_*`) go to both the API and the worker; AWS credentials go to the
+  worker only.
+- The optional `s3-local` profile adds `minio` (S3 emulator, data in the `minio-data`
+  volume) and `minio-setup` (a one-off job that creates the sample bucket and a read-only
+  user from `infra/s3-local/`). Without the profile, neither starts.
 - All ports are published on `127.0.0.1` only.
 
 ### CI (`.github/workflows/ci.yml`)
 
-Three parallel jobs on every push to `main` and every pull request:
+Four parallel jobs on every push to `main` and every pull request:
 
 1. **Backend**: `uv sync --locked` (fails if `uv.lock` is out of date; the `embeddings`
    extra is not installed), Ruff lint, Ruff format check, `alembic upgrade head` against a
@@ -240,8 +263,12 @@ Three parallel jobs on every push to `main` and every pull request:
    pytest suite (unit and integration tests, with the fake embedding provider). The
    real-model smoke test is skipped.
 2. **Frontend**: `npm ci`, oxlint (warnings fail the job), `tsc -b`, Vitest, `vite build`.
-3. **Compose**: `docker compose config` validation, including that the worker service is
-   defined.
+3. **S3 smoke (MinIO emulator)**: starts MinIO, creates a versioned bucket and a read-only
+   user with `infra/s3-local/setup.sh`, and runs `tests/test_s3_smoke.py` (new, changed and
+   deleted objects; then read-only import of the sample documents) through the real worker
+   over HTTP. No AWS account is involved.
+4. **Compose**: `docker compose config` validation, including that the worker service is
+   defined, and that the `s3-local` profile adds only `minio` and `minio-setup`.
 
 There is no deployment step.
 
@@ -260,5 +287,7 @@ checked against it:
    ADRs 0007 to 0009).
 4. **Answer evaluation** (Phase 4 harness, implemented; real-model run pending): judged
    questions and lexical metrics ([evaluation/chat.md](evaluation/chat.md)). An evaluation
-   UI and model-based or human answer review are planned for Phase 5.
-5. **Deployment** (planned): production images, authentication, AWS.
+   UI and model-based or human answer review are planned for a later phase.
+5. **Connectors** (Phase 5, implemented): Amazon S3 sources synced by the worker
+   ([connectors.md](connectors.md)).
+6. **Deployment** (planned): production images, authentication, AWS.

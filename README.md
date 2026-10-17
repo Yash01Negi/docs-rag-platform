@@ -8,12 +8,17 @@ English documents, ask questions in either language, and get answers grounded in
 documents with citations, backed by an evaluation suite that measures retrieval and answer
 quality.
 
-> **Status: Phase 4.1 (multi-model chat) is implemented.** You can upload Japanese, English
-> and mixed PDF, Markdown and text files, search them (semantic, keyword or hybrid), and ask
+> **Status: Phase 5 (S3 connectors) is implemented.** You can upload Japanese, English
+> and mixed PDF, Markdown and text files, or import them from Amazon S3 buckets that the
+> backend keeps in sync automatically, search them (semantic, keyword or hybrid), and ask
 > questions on the Chat page: answers stream in from the model you pick (Anthropic Claude,
 > Google Gemini, or a local model through Ollama), grounded in retrieved passages, with
 > citations that open the document at the cited passage. Conversations are stored and can
 > be continued, renamed and deleted, and the model can change between questions.
+>
+> **S3 connectors are verified against emulators only** (moto in the test suite, MinIO in
+> CI). No request has been made to real Amazon S3 yet
+> ([docs/s3-smoke-tests.md](docs/s3-smoke-tests.md) explains how to check a real bucket).
 >
 > **Measured, not assumed:** retrieval was evaluated with the real model on 51 judged
 > queries (semantic nDCG@10 0.927, the default; [docs/evaluation/](docs/evaluation/README.md)).
@@ -67,6 +72,11 @@ quality.
 | Citations checked against retrieved chunks, stored, and relocated after reindexing | ✅ Implemented |
 | Chat page (history sidebar, streaming, citations, expandable sources, document links) | ✅ Implemented |
 | Answer evaluation (26 judged EN/JA/cross-language questions; lexical metrics) | ✅ Implemented; run with a non-LLM baseline only |
+| S3 connectors: bucket and prefix, PDF/Markdown/text, credentials from the worker's AWS chain only, server-side allowlist | ✅ Implemented (verified with moto and MinIO; not yet against real AWS) |
+| Incremental sync (ETag and size), If-Match downloads, no mixed revisions, deletion only after a complete listing | ✅ Implemented |
+| Database-backed sync scheduler and runs (leases, retries with backoff, crash recovery, cancellation, multiple workers) | ✅ Implemented |
+| Connectors UI (list, create, edit, sync now, history, cancel, delete) and S3 source details on documents | ✅ Implemented |
+| Optional MinIO Compose profile and S3 smoke tests (MinIO in CI) | ✅ Implemented |
 | Authentication | 🕒 Planned |
 | AWS deployment | 🕒 Planned |
 
@@ -74,13 +84,13 @@ quality.
 
 | Layer | Technology |
 | --- | --- |
-| Backend | Python 3.12, FastAPI, Pydantic v2, pydantic-settings, Uvicorn, pypdfium2 (PDFium) |
+| Backend | Python 3.12, FastAPI, Pydantic v2, pydantic-settings, Uvicorn, pypdfium2 (PDFium), boto3 (S3 connectors) |
 | Embeddings (worker and API) | BAAI/bge-m3 via sentence-transformers and PyTorch (CPU, or Apple MPS on the host) |
 | Keyword search | SudachiPy + sudachidict-core (Japanese), snowballstemmer (English), PostgreSQL `tsvector` + GIN, BM25 in SQL |
 | Database | PostgreSQL 17, pgvector 0.8.1, SQLAlchemy 2 (async), psycopg 3, Alembic |
 | Answer generation | Anthropic Claude (official `anthropic` SDK), Google Gemini (official `google-genai` SDK) and local models through Ollama's HTTP API; Claude (`claude-opus-5-5`) is the default |
 | Frontend | React 19, TypeScript, Vite, Tailwind CSS v4, React Router, react-markdown |
-| Tooling | uv (locked Python dependencies), Ruff (lint + format), pytest, oxlint, Vitest, Docker Compose, GitHub Actions |
+| Tooling | uv (locked Python dependencies), Ruff (lint + format), pytest, moto (S3 emulator for tests), oxlint, Vitest, Docker Compose, MinIO (optional local S3), GitHub Actions |
 
 ## Architecture overview
 
@@ -92,20 +102,24 @@ flowchart LR
     cache2[("model cache<br/>volume")] --> be
     be -- "store original" --> files[("uploads<br/>volume")]
     be -- "stream answers" --> llm(["Anthropic API · Gemini API<br/>or Ollama (local)"])
-    worker["Ingestion worker<br/>extract · chunk · BGE-M3"] -- "claim jobs · write chunks" --> db
+    worker["Worker<br/>S3 sync · extract · chunk · BGE-M3"] -- "claim jobs · write chunks" --> db
+    worker -- "list · read objects" --> s3(["Amazon S3<br/>(or MinIO)"])
     files --> worker
     cache[("model cache<br/>volume")] --> worker
     mig["Alembic<br/>migrations"] --> db
 ```
 
-- The **frontend** has a Documents area (upload, library, details), a Search page, a Chat
-  page and a dashboard with live backend status. Evaluation is a labelled placeholder.
+- The **frontend** has a Documents area (upload, library, details), a Connectors area, a
+  Search page, a Chat page and a dashboard with live backend status. Evaluation is a
+  labelled placeholder.
 - The **API** validates and stores uploads, queues ingestion jobs in PostgreSQL, serves
   document data, runs search, and answers questions: it retrieves passages, streams a
   cited answer from the language model over Server-Sent Events, and stores conversations.
   It loads BGE-M3 once to embed search queries, on a dedicated thread.
 - The **worker** is a separate process that claims jobs, extracts text, chunks it, embeds it
-  with BAAI/bge-m3 and writes chunks and vectors in one transaction.
+  with BAAI/bge-m3 and writes chunks and vectors in one transaction. It also schedules and
+  runs S3 connector syncs, and is the only process with AWS credentials
+  ([docs/connectors.md](docs/connectors.md)).
 - The **database** is PostgreSQL with pgvector
   ([ADR 0002](docs/decisions/0002-postgres-pgvector.md)); it is also the job queue, so
   there is no Redis or Celery.
@@ -117,6 +131,10 @@ More detail: [docs/architecture.md](docs/architecture.md) ·
 [docs/chat-api.md](docs/chat-api.md) ·
 [docs/llm-providers.md](docs/llm-providers.md) ·
 [docs/llm-smoke-tests.md](docs/llm-smoke-tests.md) ·
+[docs/connectors.md](docs/connectors.md) ·
+[docs/connectors-api.md](docs/connectors-api.md) ·
+[docs/s3-setup.md](docs/s3-setup.md) ·
+[docs/s3-smoke-tests.md](docs/s3-smoke-tests.md) ·
 [docs/evaluation/](docs/evaluation/README.md) ·
 Decisions: [docs/decisions/](docs/decisions/)
 
@@ -126,7 +144,7 @@ docs-rag-platform/
 │   └── evaluation/      Judged evaluation set, metrics, harness and benchmarks
 ├── frontend/            React + TypeScript + Vite app
 ├── docs/                Architecture notes and decision records
-├── infra/               Deployment configuration (planned)
+├── infra/s3-local/      Optional MinIO emulator setup and sample documents
 ├── .github/workflows/   CI
 ├── docker-compose.yml   Local development stack
 └── .env.example         Configuration template
@@ -259,6 +277,27 @@ OLLAMA_MODELS=qwen3:8b          # after `ollama pull qwen3:8b`
 `LLM_PROVIDER` / `LLM_MODEL` only choose the default. The server accepts only models it
 lists, and it never switches to another provider or model when the chosen one fails.
 
+### Importing from Amazon S3
+
+Connectors import PDF, Markdown and text files from an S3 bucket or prefix and keep them in
+sync on a schedule. AWS credentials are set on the worker only (environment variables,
+`AWS_PROFILE` or an IAM role), never in the browser, and `S3_ALLOWED_SOURCES` limits which
+buckets can be used. Full setup, including a least-privilege IAM policy:
+[docs/s3-setup.md](docs/s3-setup.md).
+
+To try connectors without an AWS account, start the optional MinIO emulator with sample
+documents:
+
+```bash
+# in .env: MINIO_ROOT_PASSWORD, AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (a local reader
+# you choose), S3_ENDPOINT_URL=http://minio:9000, S3_REGION=us-east-1,
+# S3_ALLOWED_SOURCES=yashrag-local
+docker compose --profile s3-local up --build
+```
+
+Then open <http://localhost:5173/connectors> and add a connector for bucket
+`yashrag-local`, prefix `handbook/`.
+
 ### Configuration
 
 All configuration is read from environment variables (or `.env`). See
@@ -313,6 +352,13 @@ All configuration is read from environment variables (or `.env`). See
 | `CHAT_CONTEXT_TOKEN_BUDGET` / `CHAT_HISTORY_TOKEN_BUDGET` / `CHAT_HISTORY_MAX_MESSAGES` | no | Prompt budgets: `8000` / `3000` estimated tokens, `10` messages. |
 | `CHAT_MAX_QUESTION_CHARS` / `CHAT_MAX_CONCURRENT_GENERATIONS` | no | `4000` characters; `4` answers at once per API process. |
 | `CHAT_FOLLOWUP_MAX_CHARS` / `CHAT_CITATION_EXCERPT_CHARS` / `CHAT_HEARTBEAT_SECONDS` / `CHAT_MAX_TITLE_CHARS` | no | `60` / `600` / `15` / `200`. See [docs/chat.md](docs/chat.md). |
+| `S3_ALLOWED_SOURCES` | for connectors | Comma-separated buckets or `bucket/prefix/` scopes connectors may read. Empty: connectors are off (`503 connectors_not_configured`). |
+| `S3_REGION` / `S3_ENDPOINT_URL` / `S3_ADDRESSING_STYLE` | no | Bucket region; server-side endpoint override for MinIO (`scheme://host[:port]` only, never from the browser); `auto`. |
+| `S3_MAX_OBJECT_BYTES` / `S3_MAX_OBJECTS_PER_SYNC` / `S3_LIST_PAGE_SIZE` | no | `20971520` / `10000` / `1000`. |
+| `S3_CONNECT_TIMEOUT_SECONDS` / `S3_READ_TIMEOUT_SECONDS` / `S3_MAX_ATTEMPTS` | no | `10` / `60` / `3`. |
+| `CONNECTOR_SYNC_CONCURRENCY` / `CONNECTOR_SYNC_MAX_ATTEMPTS` / `CONNECTOR_SYNC_RETRY_BACKOFF_SECONDS` | no | `1` / `3` / `30`. See [docs/connectors.md](docs/connectors.md#configuration). |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` / `AWS_PROFILE` / `AWS_REGION` | for connectors | Worker credentials through the standard AWS chain; passed to the worker only, never stored or returned. Empty values are ignored. |
+| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` / `S3_LOCAL_BUCKET` | `s3-local` profile only | Local MinIO administrator and sample bucket. |
 
 ## Testing
 
@@ -362,6 +408,19 @@ RUN_MODEL_TESTS=1 uv run --extra embeddings pytest -m model
 RUN_LLM_SMOKE_TESTS=1 GEMINI_API_KEY=… uv run pytest -m live_llm -s
 ```
 
+#### S3 smoke tests
+
+The connector tests use moto (an in-process S3 emulator). `tests/test_s3_smoke.py` runs the
+real worker over HTTP against MinIO or a real bucket; it is skipped unless
+`RUN_S3_SMOKE_TESTS=1`, and CI runs it against MinIO. See
+[docs/s3-smoke-tests.md](docs/s3-smoke-tests.md):
+
+```bash
+RUN_S3_SMOKE_TESTS=1 S3_SMOKE_BUCKET=yashrag-local S3_SMOKE_WRITE=1 \
+  S3_ENDPOINT_URL=http://127.0.0.1:9000 S3_REGION=us-east-1 AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… \
+  uv run pytest tests/test_s3_smoke.py -m s3_smoke
+```
+
 #### Retrieval evaluation
 
 `backend/evaluation/` holds a judged evaluation set (13 documents, 51 English, Japanese and
@@ -408,8 +467,9 @@ npm test                        # Vitest + Testing Library (jsdom)
 npm run build                   # production build into dist/
 ```
 
-CI runs all of the above (except the real-model smoke test) on every push to `main` and
-every pull request, plus `alembic check` and Docker Compose config validation.
+CI runs all of the above (except the real-model and real-provider smoke tests) on every push
+to `main` and every pull request, plus `alembic check`, Docker Compose config validation
+(with and without the `s3-local` profile) and the S3 smoke tests against MinIO.
 
 ## Current limitations
 
@@ -445,8 +505,14 @@ every pull request, plus `alembic check` and Docker Compose config validation.
   rename and delete every conversation. Conversations are not private between people, and
   deduplication is global.
   Do not expose the stack to the public internet.
-- Original files are stored on local disk (a Docker volume) with no backups. The storage
-  interface is ready for object storage, but no S3 implementation exists.
+- **S3 connectors have not been run against real Amazon S3**, only against moto and MinIO.
+  IAM policies, regions and real ETag/versioning behaviour are untested. Every sync lists
+  the whole prefix (no S3 event notifications), deletions in S3 show up on the next
+  successful sync, and a changed document is briefly missing from search while it is
+  re-indexed. Anyone who can reach the server can manage connectors for the allowed
+  buckets. See [docs/connectors.md](docs/connectors.md#known-limitations).
+- Original files, including copies of imported S3 objects, are stored on local disk (a
+  Docker volume) with no backups.
 - PDF parsing uses [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) (Google's
   PDFium; BSD-3-Clause / Apache-2.0), so the backend has no AGPL dependency. PyMuPDF
   (AGPL-3.0) was used during early Phase 2 development and has been removed. The one
@@ -468,8 +534,8 @@ every pull request, plus `alembic check` and Docker Compose config validation.
 | 3. Retrieval | Semantic, bilingual keyword and hybrid search, search API and UI, retrieval evaluation | ✅ Done |
 | 4. Chat | Grounded, streamed answers with citations, conversations, chat UI, answer evaluation harness | ✅ Implemented (real-model run pending an API key) |
 | 4.1 Multi-model | Gemini and Ollama providers, model catalog, per-question model selector | ✅ Implemented (real-provider runs pending keys and an Ollama server) |
-| 5. Evaluation | Evaluation UI, model-based or human answer review (lexical answer metrics exist since Phase 4) | 🕒 Planned |
-| 6. Deployment | Production images, AWS infrastructure, monitoring | 🕒 Planned |
+| 5. S3 connectors | Amazon S3 connectors, incremental scheduled sync, Connectors UI, MinIO profile | ✅ Implemented (emulator-verified; real AWS run pending) |
+| Later | Evaluation UI and answer review; production images, AWS infrastructure, authentication, monitoring | 🕒 Planned |
 
 ## License
 

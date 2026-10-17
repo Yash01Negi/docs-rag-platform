@@ -61,8 +61,10 @@ the worker can be restarted, scaled or moved to a machine with a GPU on its own.
    - Markdown and text: must decode as UTF-8 (a BOM is allowed) and contain no NUL bytes.
    A renamed binary, a PDF named `.txt`, an empty file, or an unsupported extension is
    rejected with `415` or `422` and a specific error code. No document is created.
-3. **Deduplication.** If a document with the same SHA-256 exists, the response is `200`
-   with `"duplicate": true` and that document. See ADR 0004 for the concurrent case.
+3. **Deduplication.** If an uploaded document with the same SHA-256 exists, the response
+   is `200` with `"duplicate": true` and that document. See ADR 0004 for the concurrent
+   case. Since Phase 5, documents imported by S3 connectors are not part of this check
+   ([connectors.md](connectors.md)); they enter the same pipeline from the worker.
 4. **Storage.** The file is stored under a generated key; the sanitized original filename
    is metadata only.
 5. **Queueing.** The document row (status `pending`) and an `ingest` job are inserted in one
@@ -237,7 +239,7 @@ lazily on the first job (or at startup with `WORKER_PRELOAD_MODEL=true`).
 Migration `0002_documents` (in `backend/alembic/versions/`) adds:
 
 **`documents`**: `id`, `filename` (sanitized original name), `file_type`, `mime_type`,
-`size_bytes`, `sha256` (unique), `storage_key` (unique), `language`, `page_count`,
+`size_bytes`, `sha256` (unique among uploads since Phase 5), `source_type` (`upload` or `s3`), `storage_key` (unique), `language`, `page_count`,
 `status`, `error_code`, `error_message`, `chunk_count`, `embedding_model`,
 `embedding_model_revision`, `embedding_dimension`, `created_at`, `updated_at`,
 `processed_at`. CHECK constraints enforce the status values, the completed and failed
