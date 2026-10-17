@@ -447,7 +447,7 @@ export default function ConnectorDetailPage() {
                 <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
                   <SyncStatusBadge status={current.status} />
                   <span>{formatDateTime(current.started_at ?? current.created_at)}</span>
-                  <span>· {current.objects_scanned} objects listed</span>
+                  <span>{current.objects_scanned} objects listed</span>
                 </div>
                 <Counts run={current} />
               </>
